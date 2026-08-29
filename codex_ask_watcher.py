@@ -117,8 +117,22 @@ def _normalize_item(item: object) -> dict:
         "dynamicToolCall": "dynamic_tool_call",
         "webSearch": "web_search",
         "imageView": "image_view",
+        "imageGeneration": "image_generation",
+        "collabAgentToolCall": "collab_agent_tool_call",
+        "subAgentActivity": "sub_agent_activity",
         "contextCompaction": "context_compaction",
+        "enteredReviewMode": "entered_review_mode",
+        "exitedReviewMode": "exited_review_mode",
+        "plan": "plan",
+        "sleep": "sleep",
     }.get(result.get("type"), result.get("type", "unknown"))
+    # Keep the names used by the app-server protocol and add the snake_case
+    # aliases used by the renderer.  This lets completed and in-progress
+    # events use exactly the same human-facing formatting.
+    if "aggregated_output" not in result:
+        result["aggregated_output"] = result.get("aggregatedOutput")
+    if "exit_code" not in result:
+        result["exit_code"] = result.get("exitCode")
     return result
 
 
@@ -133,38 +147,123 @@ def _short(value: object, limit: int = 1200) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _item_text(value: object) -> str:
+    """Turn protocol text/list parts into a compact displayable string."""
+    if value in (None, ""):
+        return ""
+    if isinstance(value, list):
+        parts = []
+        for part in value:
+            if isinstance(part, dict):
+                part = part.get("text") or part.get("content") or part.get("summary") or ""
+            if part not in (None, ""):
+                parts.append(str(part))
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        return _short(value)
+    return str(value)
+
+
 def _item_label(item: dict) -> tuple[str, str]:
+    """Return a Claude-style (label, input) pair for one app-server item.
+
+    The old renderer used generic fallbacks ("Выполняю", "выполняется" and
+    "Действие Codex").  Those hide what Codex is actually doing and caused a
+    fake status line to replace the initial spinner before any real event had
+    arrived.  Every known tool now gets a concrete label; unknown future
+    items degrade to a neutral "Инструмент" label without pretending that a
+    command is running.
+    """
     kind = item.get("type", "unknown")
-    labels = {
-        "command_execution": "⚙️ Выполняю",
-        "file_change": "📝 Изменение файла",
-        "web_search": "🔎 Поиск",
-        "mcp_tool_call": "🧩 Telegram tool",
-        "dynamic_tool_call": "🔧 Инструмент",
-        "image_view": "🖼 Просмотр изображения",
-        "context_compaction": "🗜 Сжатие контекста",
-        "reasoning": "🤔 Думаю",
-    }
-    label = labels.get(kind, "🔧 Действие Codex")
     if kind == "command_execution":
-        content = item.get("command") or item.get("aggregatedOutput") or "выполняется"
-    elif kind == "file_change":
+        return "🔧 Bash", _short(item.get("command") or item.get("commandLine") or "")
+    if kind == "file_change":
         changes = item.get("changes") or []
         paths = []
         for change in changes if isinstance(changes, list) else [changes]:
             if isinstance(change, dict) and change.get("path"):
-                paths.append(str(change["path"]))
-        content = "\n".join(paths) or item.get("path") or "файл изменён"
+                change_kind = change.get("kind")
+                if isinstance(change_kind, dict):
+                    change_kind = change_kind.get("type")
+                suffix = {"add": "создан", "delete": "удалён", "update": "изменён"}.get(
+                    str(change_kind or ""), "изменён"
+                )
+                paths.append(f"{change['path']} — {suffix}")
+        return "✏️ Изменение файла", _short("\n".join(paths) or item.get("path") or "")
+    if kind == "web_search":
+        action = item.get("action") or {}
+        if isinstance(action, dict):
+            query = action.get("query") or action.get("url")
+        else:
+            query = None
+        query = item.get("query") or query or ""
+        return "🔍 WebSearch", _short(query)
+    if kind == "mcp_tool_call":
+        name = ".".join(filter(None, (item.get("server"), item.get("tool")))) or "Telegram tool"
+        return f"🔧 {name}", _short(item.get("arguments") or "")
+    if kind == "dynamic_tool_call":
+        name = ".".join(filter(None, (item.get("namespace"), item.get("tool")))) or "Инструмент"
+        return f"🔧 {name}", _short(item.get("arguments") or "")
+    if kind in ("collab_agent_tool_call", "sub_agent_activity"):
+        name = item.get("tool") or item.get("kind") or "агент"
+        content = item.get("prompt") or item.get("agentsStates") or item.get("status") or ""
+        return f"🤖 Агент · {name}", _short(content)
+    if kind == "image_view":
+        return "🖼 Просмотр изображения", _short(item.get("path") or "")
+    if kind == "image_generation":
+        return "🎨 Генерация изображения", _short(item.get("failure") or "")
+    if kind == "context_compaction":
+        return "🗜 Сжатие контекста", "контекст сессии сжат"
+    if kind == "plan":
+        return "📋 План", _short(item.get("text") or "")
+    if kind == "sleep":
+        duration = item.get("durationMs")
+        try:
+            duration = f"{float(duration) / 1000:g} с"
+        except (TypeError, ValueError):
+            duration = ""
+        return "⏳ Ожидание", duration
+    if kind in ("entered_review_mode", "exited_review_mode"):
+        return "🔍 Проверка", "режим проверки включён" if kind.startswith("entered") else "режим проверки завершён"
+    if kind in ("agent_message", "reasoning"):
+        return "✍️", _item_text(item.get("text") or item.get("summary") or item.get("content"))
+
+    # Future protocol types: expose only a short, useful value.  Never dump
+    # the full event envelope (it may contain opaque IDs or large payloads).
+    value = item.get("name") or item.get("tool") or item.get("query") or item.get("arguments")
+    if value in (None, ""):
+        value = str(kind).replace("_", " ")
+    return "🔧 Инструмент", _short(value)
+
+
+def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
+    """Render completed tool output like Claude's separate result blocks."""
+    kind = item.get("type", "unknown")
+    blocks: list[tuple[str, str]] = []
+    if kind == "command_execution":
+        output = item.get("aggregated_output") or item.get("aggregatedOutput")
+        if output not in (None, ""):
+            blocks.append(("📤 Результат", _short(output, 1800)))
+        exit_code = item.get("exit_code") if "exit_code" in item else item.get("exitCode")
+        if exit_code is not None:
+            try:
+                ok = int(exit_code) == 0
+            except (TypeError, ValueError):
+                ok = False
+            blocks.append(("✅ Код завершения" if ok else "❌ Код завершения", str(exit_code)))
     elif kind == "mcp_tool_call":
-        name = ".".join(filter(None, (item.get("server"), item.get("tool"))))
-        content = name or "вызов Telegram tool"
-    elif kind in ("agent_message", "reasoning"):
-        content = item.get("text") or item.get("summary") or item.get("content") or ""
-        if isinstance(content, list):
-            content = "\n".join(str(part) for part in content)
-    else:
-        content = item.get("query") or item.get("arguments") or item.get("text") or "выполняется"
-    return label, _short(content)
+        if item.get("error"):
+            error = item.get("error")
+            blocks.append(("❌ Ошибка", _short(error, 1200)))
+        elif item.get("result") is not None:
+            result = item.get("result")
+            if isinstance(result, dict):
+                content = result.get("content") or result.get("contentItems") or []
+                result = _item_text(content) or result.get("structuredContent") or "результат получен"
+            blocks.append(("📤 Результат", _short(result, 1600)))
+    elif kind == "dynamic_tool_call" and item.get("contentItems") is not None:
+        blocks.append(("📤 Результат", _short(_item_text(item.get("contentItems")), 1600)))
+    return blocks
 
 
 class TurnState:
@@ -176,6 +275,9 @@ class TurnState:
         self.reasoning: list[str] = []
         self.final_text = ""
         self.stream_text = ""
+        self.reasoning_text = ""
+        self.current_item: dict | None = None
+        self.active_item_id: str | None = None
         self.error: str | None = None
         self.last_progress_at = 0.0
         self.last_progress = ""
@@ -183,23 +285,34 @@ class TurnState:
     def _progress_value(self) -> str:
         with self.lock:
             lines: list[str] = []
-            if self.stream_text:
-                lines.append(f"<blockquote>🤔 {html.escape(self.stream_text[-3500:], quote=False)}</blockquote>")
-            elif self.reasoning:
-                lines.append(f"<blockquote>🤔 {html.escape(self.reasoning[-1][-2500:], quote=False)}</blockquote>")
-            if self.items:
-                label, content = _item_label(self.items[-1])
-                if self.items[-1].get("type") not in ("agent_message", "reasoning"):
-                    lines.append(
-                        f"<b>{html.escape(label, quote=False)}</b>\n"
-                        f"<pre>{html.escape(content, quote=False)}</pre>"
-                    )
-            return "\n".join(lines) or "🤔 Думаю"
+            thought = self.stream_text or self.reasoning_text or (self.reasoning[-1] if self.reasoning else "")
+            if thought:
+                # Same neutral writing marker as Claude's renderer.  The
+                # final answer may be preceded by a tool call, so calling it
+                # "reasoning" (🤔) here is misleading and caused the abrupt
+                # spinner → 🤔 transition reported by the owner.
+                lines.append(f"✍️ {html.escape(thought[-3500:], quote=False)}")
+            item = self.current_item
+            if item and item.get("type") not in ("agent_message", "reasoning"):
+                label, content = _item_label(item)
+                lines.append(f"{html.escape(label, quote=False)}:")
+                if content:
+                    lines.append(f"<pre>{html.escape(content, quote=False)}</pre>")
+                for result_label, result_content in _item_result_blocks(item):
+                    lines.append(f"{html.escape(result_label, quote=False)}:")
+                    lines.append(f"<pre>{html.escape(result_content, quote=False)}</pre>")
+            return "\n".join(lines)
 
     def progress(self) -> str:
         with self.lock:
             now = time.monotonic()
             value = self._progress_value()
+            # Do not publish a synthetic "🤔 Думаю" event for every protocol
+            # notification.  The Telegram-side module owns the initial
+            # spinner; this backend should publish only real thought/tool
+            # content, exactly like Claude's watcher.
+            if not value:
+                return ""
             if value == self.last_progress and now - self.last_progress_at < PROGRESS_THROTTLE:
                 return ""
             self.last_progress = value
@@ -209,24 +322,76 @@ class TurnState:
     def add_notification(self, method: str, params: dict) -> None:
         with self.lock:
             if method == "item/agentMessage/delta":
+                item_id = params.get("itemId")
+                if item_id and item_id != self.active_item_id:
+                    self.stream_text = ""
+                self.active_item_id = item_id or self.active_item_id
+                self.current_item = None
                 self.stream_text += str(params.get("delta") or "")
-            elif method in ("item/started", "item/completed"):
+            elif method in (
+                "item/reasoning/summaryTextDelta",
+                "item/reasoning/textDelta",
+            ):
+                item_id = params.get("itemId")
+                if item_id and item_id != self.active_item_id:
+                    self.reasoning_text = ""
+                self.active_item_id = item_id or self.active_item_id
+                self.current_item = None
+                self.reasoning_text += str(params.get("delta") or "")
+            elif method == "item/commandExecution/outputDelta":
+                item_id = params.get("itemId")
+                if self.current_item and (
+                    not item_id or self.current_item.get("id") == item_id
+                ):
+                    output = self.current_item.get("aggregated_output") or self.current_item.get("aggregatedOutput") or ""
+                    self.current_item["aggregated_output"] = f"{output}{params.get('delta') or ''}"
+            elif method == "item/mcpToolCall/progress":
+                if self.current_item:
+                    self.current_item["progress"] = params.get("message") or ""
+            elif method in ("item/started", "item/updated", "item/completed"):
                 item = _normalize_item(params.get("item"))
                 item_type = item.get("type")
+                # Protocol bookkeeping is not a model action.  In particular,
+                # rendering userMessage here was another path to the generic
+                # "Действие Codex" line before the real assistant event.
+                if item_type in ("userMessage", "user_message", "hookPrompt", "hook_prompt"):
+                    return
+                item_id = item.get("id")
+                if method in ("item/started", "item/updated"):
+                    if item_type in ("agent_message", "reasoning"):
+                        if item_id and item_id != self.active_item_id:
+                            self.stream_text = ""
+                            self.reasoning_text = ""
+                        self.active_item_id = item_id or self.active_item_id
+                        self.current_item = None
+                    else:
+                        # A tool call closes the preceding visible thought,
+                        # just as in Claude's stream renderer.
+                        if self.stream_text.strip():
+                            self.reasoning.append(self.stream_text.strip())
+                        if self.reasoning_text.strip():
+                            self.reasoning.append(self.reasoning_text.strip())
+                        self.stream_text = ""
+                        self.reasoning_text = ""
+                        self.current_item = item
+                        self.active_item_id = item_id or self.active_item_id
                 if method == "item/completed":
                     self.items.append(item)
-                if item_type == "agent_message":
-                    text = item.get("text") or ""
-                    if isinstance(text, list):
-                        text = "\n".join(str(part) for part in text)
-                    if text:
-                        self.final_text = str(text)
-                elif item_type == "reasoning":
-                    text = item.get("text") or item.get("summary") or ""
-                    if isinstance(text, list):
-                        text = "\n".join(str(part) for part in text)
-                    if text and method == "item/completed":
-                        self.reasoning.append(str(text))
+                    if item_type == "agent_message":
+                        text = _item_text(item.get("text")) or self.stream_text
+                        self.final_text = text or self.final_text
+                        self.stream_text = ""
+                        self.current_item = None
+                    elif item_type == "reasoning":
+                        text = _item_text(item.get("text") or item.get("summary") or item.get("content"))
+                        text = text or self.reasoning_text
+                        if text:
+                            self.reasoning.append(text)
+                        self.reasoning_text = ""
+                        self.current_item = None
+                    else:
+                        self.current_item = item
+                    self.active_item_id = item_id or self.active_item_id
             elif method == "error" and not params.get("willRetry"):
                 error = params.get("error")
                 if isinstance(error, dict):

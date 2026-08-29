@@ -16,10 +16,12 @@
 # file's docstring for
 # why most of the old 8-tool client marker surface is gone.
 #
-# Live progress: instead of a local fake spinner, this polls claude_watcher's
-# streamed progress (a "🧠 thought" anchor with "🔧 tool call" + StdOut/StdErr
-# blocks rendered under it, same scheme as the Claude-Telegram-bridge project)
-# and live-edits the same message with whatever it published. Once the
+# Live progress: this polls codex_ask_watcher's streamed progress (a neutral
+# "✍️" writing/thought line with a concrete "🔧" tool call and result blocks,
+# same scheme as the Claude-Telegram-bridge project) and live-edits the same
+# message with whatever it published. The backend does not invent a generic
+# progress line while it is waiting, so the initial spinner remains visible
+# until a real event arrives. Once the
 # watcher signals done, all of that is wiped and replaced with a plain:
 #   👤 <what was asked>
 #   🤖 <answer>
