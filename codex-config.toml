@@ -1,0 +1,9 @@
+# Codex configuration used only by codex_ask_watcher.py.
+# The standalone /home/mishin/codex-telegram-bot does not load this file.
+
+[mcp_servers.telegram_actions]
+command = "/home/mishin/.claude-telegram-bridge/jarvis-ask/mcp_venv/bin/python3"
+args = ["/home/mishin/codex-jarvis/telegram_actions_mcp.py"]
+startup_timeout_sec = 20.0
+tool_timeout_sec = 40.0
+default_tools_approval_mode = "auto"
