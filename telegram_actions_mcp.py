@@ -202,7 +202,7 @@ def register_trigger(specs: list[dict] | dict, chat: str = "") -> str:
     пусто/'this' = текущий чат. specs -- один объект или список объектов
     (регистрирует сразу несколько триггеров одним вызовом), каждый вида
     {"kind": "keyword"|"link"|"button"|"semantic"|"any", "value": ...,
-    "action": "notify"|"reply"|"delete"|"confirm"|"agent"|"post", "verify": "...",
+    "action": "notify"|"reply"|"delete"|"confirm"|"agent"|"post", "engine": "claude"|"codex", "verify": "...",
     "instruction": "...", "reply_text": "...", "label": "...",
     "trusted_senders": [...], "only_senders": [...], "skip_admins": true|false,
     "target": "...", "template": "...", "as_bot": true|false}.

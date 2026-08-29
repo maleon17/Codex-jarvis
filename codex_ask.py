@@ -80,6 +80,7 @@ urllib.request.install_opener(
 # between the two clients now that the backend's session-file naming no
 # longer special-cases this instance either (2026-08-04 symmetry pass).
 INSTANCE_ID = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
+ENGINE = "codex"
 MAX_ROUNDS = 5  # mirrors claude_watcher.py's own round discipline
 POLL_TIMEOUT_S = 600  # agentic file-editing tasks can genuinely take a while
 # Braille-spinner "thinking" animation (edit-driven, ~0.5s cadence) -- PRIVATE
@@ -1658,6 +1659,9 @@ class CodexAsk(loader.Module):
             return None, "action=agent требует instruction"
         if action == "post" and not spec.get("target"):
             return None, "action=post требует target"
+        engine = str(spec.get("engine") or ENGINE).lower()
+        if engine not in ("claude", "codex"):
+            return None, f"некорректный engine: {engine} (ожидался claude или codex)"
         value = spec.get("value")
         if kind == "keyword" and isinstance(value, str):
             value = [value]
@@ -1680,6 +1684,7 @@ class CodexAsk(loader.Module):
             "kind": kind,
             "value": value,
             "action": action,
+            "engine": engine,
             "verify": spec.get("verify"),
             "instruction": spec.get("instruction"),
             "reply_text": spec.get("reply_text"),
@@ -1823,7 +1828,7 @@ class CodexAsk(loader.Module):
         lines = []
         for cid, t in items:
             chat_label = await self._chat_label(int(cid))
-            line = f"- id={t['id']}, чат «{chat_label}», {t['kind']} → {t['action']}: {t.get('label', '')}"
+            line = f"- id={t['id']}, [{t.get('engine', 'claude')}] чат «{chat_label}», {t['kind']} → {t['action']}: {t.get('label', '')}"
             exempt_bits = []
             if t.get("only_senders"):
                 exempt_bits.append("только от: " + ", ".join(t["only_senders"]))
@@ -1892,20 +1897,27 @@ class CodexAsk(loader.Module):
             return "unsure"
         loop = asyncio.get_running_loop()
 
-        def call():
+        def call(path):
             data = json.dumps({"text": text[:2000], "condition": condition}).encode()
             req = urllib.request.Request(
-                f"{FUNNEL}/xclassify", data=data,
+                f"{FUNNEL}/{path}", data=data,
                 headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.loads(r.read())
 
         try:
-            result = await loop.run_in_executor(None, call)
+            result = await loop.run_in_executor(None, call, "xclassify")
             return result.get("result") or "unsure"
         except Exception:
-            return "unsure"
+            # Fall back to Claude's classifier when the Codex worker/account
+            # is unavailable. A genuine "unsure" result above is preserved;
+            # only a failed request is retried on the other backend.
+            try:
+                result = await loop.run_in_executor(None, call, "classify")
+                return result.get("result") or "unsure"
+            except Exception:
+                return "unsure"
 
     async def _resolve_verified_action(self, trig, message):
         """A keyword/link/button match already happened (cheap, free) --
@@ -2005,7 +2017,19 @@ class CodexAsk(loader.Module):
             return True
         return False
 
-    async def _fire_reply_via_agent(self, trig, message, chat_label, sender):
+    def _fallback_backend(self):
+        try:
+            return self.lookup("JarvisAsk").fallback(ENGINE)
+        except Exception:
+            return None
+
+    def _backend_failed(self, answer):
+        try:
+            return self.lookup("JarvisAsk").is_failure(answer)
+        except Exception:
+            return False
+
+    async def _fire_reply_via_agent(self, trig, message, chat_label, sender, allow_fallback=True):
         """No canned reply_text -- composing an actually-appropriate reply
         is a generation task, not a lookup, so this is the one trigger
         path that spawns a real Tier 2 agentic call (same queue/poll
@@ -2025,7 +2049,12 @@ class CodexAsk(loader.Module):
         async with self._agent_trigger_lock(message.chat_id):
             req_id = str(uuid.uuid4())
             if not self._enqueue(question, message.chat_id, req_id, "chat"):
-                return
+                fallback = self._fallback_backend() if allow_fallback else None
+                if fallback is not None:
+                    return await fallback._fire_reply_via_agent(
+                        trig, message, chat_label, sender, allow_fallback=False,
+                    )
+                return False
             answer = None
             for _ in range(60):
                 await asyncio.sleep(1)
@@ -2036,19 +2065,25 @@ class CodexAsk(loader.Module):
                 if isinstance(d, dict) and d.get("request_id") == req_id and d.get("done"):
                     answer = d.get("answer")
                     break
-        if not answer:
+        if not answer or self._backend_failed(answer):
+            fallback = self._fallback_backend() if allow_fallback else None
+            if fallback is not None:
+                return await fallback._fire_reply_via_agent(
+                    trig, message, chat_label, sender, allow_fallback=False,
+                )
             await self._notify_topic("moderation", "⚠️ Автоответ по триггеру не дождался ответа агента.")
-            return
+            return False
         try:
             await message.reply(answer)
         except Exception as e:
             await self._notify_topic("moderation", f"⚠️ Не смог отправить автоответ агента: {_h(str(e))}")
-            return
+            return False
         await self._notify_topic(
             "moderation",
             f"↩️ Автоответ (агент, {_h(trig.get('label', 'reply'))}) — <b>{_h(chat_label)}</b>, "
             f"{_h(sender)}:\n<blockquote>{_h(answer)}</blockquote>",
         )
+        return True
 
     async def _poll_result_silent(self, req_id, timeout_s=POLL_TIMEOUT_S):
         """Same wait-for-done loop as _poll_progress_and_result, but with
@@ -2157,7 +2192,7 @@ class CodexAsk(loader.Module):
                 f"⚠️ Триггер [{_h(trig.get('id', '?'))}] action=post не смог отправить алерт: {_h(result)}",
             )
 
-    async def _fire_agent_action(self, trig, message, chat_label, sender):
+    async def _fire_agent_action(self, trig, message, chat_label, sender, allow_fallback=True):
         """action='agent': the owner's own instruction, set once at
         register_trigger time, carried out by a full Tier 2 agentic call
         with access to the ENTIRE tool surface (send_message incl. chat_id/
@@ -2174,7 +2209,7 @@ class CodexAsk(loader.Module):
             await self._notify_topic(
                 "moderation", f"⚠️ Триггер [{_h(trig.get('id', '?'))}] action=agent без instruction, нечего выполнять.",
             )
-            return
+            return False
         urls = self._extract_urls(message)
         url_note = (
             "\n\n[Реальные адреса ссылок в этом сообщении: " + ", ".join(urls) + " -- "
@@ -2205,13 +2240,23 @@ class CodexAsk(loader.Module):
             self._agent_turn_sent[str(message.chat_id)] = False
             req_id = str(uuid.uuid4())
             if not self._enqueue(prompt, message.chat_id, req_id, "chat"):
-                return
+                fallback = self._fallback_backend() if allow_fallback else None
+                if fallback is not None:
+                    return await fallback._fire_agent_action(
+                        trig, message, chat_label, sender, allow_fallback=False,
+                    )
+                return False
             answer, thoughts = await self._poll_result_silent(req_id)
-            if answer is None:
+            if answer is None or self._backend_failed(answer):
+                fallback = self._fallback_backend() if allow_fallback else None
+                if fallback is not None:
+                    return await fallback._fire_agent_action(
+                        trig, message, chat_label, sender, allow_fallback=False,
+                    )
                 await self._notify_topic(
                     "moderation", f"⚠️ Триггер [{_h(trig.get('id', '?'))}] (agent) не дождался ответа.",
                 )
-                return
+                return False
             reporter = _HeadlessReporter(
                 lambda text: self._reply_to_origin(trig, f"🤖 (авто, {_h(trig.get('label') or 'agent')}): {text}")
             )
@@ -2233,6 +2278,7 @@ class CodexAsk(loader.Module):
                     f"🔔 Автозадача «{_h(trig.get('label') or 'agent')}» ждёт твоего внимания -- "
                     f"смотри ответ в исходном чате.",
                 )
+        return True
 
     async def _reply_to_origin(self, trig, text):
         """Report an action=agent trigger's follow-up back into the exact
@@ -2517,10 +2563,7 @@ class CodexAsk(loader.Module):
             else:
                 await self._fire_reply_via_agent(trig, message, chat_label, sender)
 
-    # ClaudeAsk remains the single trigger watcher for the shared trigger
-    # database.  Keep this implementation available for a future extraction,
-    # but do not register it from CodexAsk: doing so would fire each rule
-    # twice whenever both modules are loaded.
+    @loader.watcher()
     async def trigger_watcher(self, message):
         """Fires on EVERY incoming message this account sees (Heroku's own
         watcher dispatch, not a custom polling loop) -- but the per-chat
@@ -2543,6 +2586,13 @@ class CodexAsk(loader.Module):
         trigger's chat receiving some non-message event. Guarding once
         here, at the single entry point every trigger kind/action funnels
         through, beats patching each individual attribute access."""
+        try:
+            coordinator = self.lookup("JarvisAsk")
+        except Exception:
+            coordinator = None
+        if coordinator is not None:
+            await coordinator.handle_message(message, ENGINE, self)
+            return
         if not isinstance(message, Message):
             return
         if message.out:
@@ -2552,6 +2602,8 @@ class CodexAsk(loader.Module):
             return
         resolved = []
         for t in chat_triggers:
+            if str(t.get("engine") or "claude").lower() != ENGINE:
+                continue
             if await self._is_trigger_exempt(t, message):
                 continue
             if not await self._trigger_matches(t, message):
@@ -2815,7 +2867,10 @@ class CodexAsk(loader.Module):
 
     # -- Main ask loop --------------------------------------------------------
 
-    async def _do_ask(self, message, question, mode="chat", orig_question=None, round_num=0, work_message=None):
+    async def _do_ask(
+        self, message, question, mode="chat", orig_question=None, round_num=0,
+        work_message=None, allow_fallback=True,
+    ):
         """`message` is always the ORIGINAL trigger -- reply-to/history
         context is read from it. `work_message` is what actually gets
         edited; resolved once via `_work_message()` on the first round and
@@ -2926,9 +2981,20 @@ class CodexAsk(loader.Module):
         # chat-access requirement, not a formatting/schema issue.
         answer, thoughts = [None, []]
         topic_id = self._topic_of(message)
+        enqueued = False
         async with self._client.action(chat_id, "typing"):
             if self._enqueue(question, chat_id, req_id, mode, topic_id=topic_id, exclude_id=work_message.id):
+                enqueued = True
                 answer, thoughts = await self._poll_progress_and_result(work_message, req_id, animate=animate)
+
+        if allow_fallback and (not enqueued or self._backend_failed(answer)):
+            fallback = self._fallback_backend()
+            if fallback is not None:
+                return await fallback._do_ask(
+                    message, question, mode=mode, orig_question=orig_question,
+                    round_num=round_num, work_message=work_message,
+                    allow_fallback=False,
+                )
 
         if answer is None:
             await self._safe_edit(
