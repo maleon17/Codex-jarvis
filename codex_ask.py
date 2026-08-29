@@ -1531,6 +1531,17 @@ class CodexAsk(loader.Module):
         is_numeric = target.lstrip("-").isdigit()
         is_username = target.startswith("@")
         needle = (target[1:] if is_username else target).lower()
+        # Prefer a title already associated with stored triggers. Telegram
+        # may contain multiple dialogs with the same display title; picking
+        # the first generic dialog can otherwise select an unrelated chat
+        # and falsely report that the requested trigger set is empty.
+        if not is_numeric and not is_username:
+            for cid in self._get_triggers():
+                try:
+                    if (await self._chat_label(int(cid))).lower() == needle:
+                        return int(cid)
+                except Exception:
+                    continue
         try:
             async for d in self._client.iter_dialogs():
                 ent = d.entity
@@ -1865,16 +1876,18 @@ class CodexAsk(loader.Module):
 
     async def _classify_condition(self, condition, text):
         """Tier 1: 3-way ("yes"/"no"/"unsure") classification via
-        cmd_queue.py's /classify, which routes to claude_watcher.py's
-        mode='classify' (`claude -p --model haiku`, flat subscription, not
-        a metered external API -- see cmd_queue.py's classify_semantic for
-        the full story). Lighter than the heavy agentic `.ask` path, but
-        not free like keyword/link/button -- used for kind='semantic'
-        triggers (rare, per the persona) AND as the verify-gate for
-        keyword-prefiltered triggers (see _resolve_verified_action).
-        "unsure" is a real third outcome, not an error state -- any
-        request failure/timeout also collapses to "unsure" (fail safe:
-        escalate to a human rather than silently act or silently ignore)."""
+        cmd_queue.py's /xclassify, which routes to codex_ask_watcher.py's
+        mode='classify' (CODEX_CLASSIFY_MODEL, gpt-5.4 as of 2026-08-29 --
+        no Haiku equivalent on this side, but same flat ChatGPT-subscription
+        auth, not a metered external API -- see cmd_queue.py's
+        classify_semantic_codex for the full story). Lighter than the heavy
+        agentic `.xask` path, but not free like keyword/link/button -- used
+        for kind='semantic' triggers (rare, per the persona) AND as the
+        verify-gate for keyword-prefiltered triggers (see
+        _resolve_verified_action). "unsure" is a real third outcome, not an
+        error state -- any request failure/timeout also collapses to
+        "unsure" (fail safe: escalate to a human rather than silently act or
+        silently ignore)."""
         if not condition or not text:
             return "unsure"
         loop = asyncio.get_running_loop()
@@ -1882,7 +1895,7 @@ class CodexAsk(loader.Module):
         def call():
             data = json.dumps({"text": text[:2000], "condition": condition}).encode()
             req = urllib.request.Request(
-                f"{FUNNEL}/classify", data=data,
+                f"{FUNNEL}/xclassify", data=data,
                 headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -2957,10 +2970,21 @@ class CodexAsk(loader.Module):
         # parse, _safe_edit swallows the exception), which is why a chain
         # of several thoughts could end up showing only the last one (or
         # none) instead of one blockquote per thought as intended.
+        # `answer` is the model's own HTML and is explicitly allowed to use
+        # <blockquote> itself (see the persona's allowed-tags list) -- it
+        # used to be wrapped in an outer <blockquote> here too, and Telegram
+        # doesn't support nested blockquotes: whenever the model's answer
+        # legitimately quoted something, the FIRST </blockquote> Telegram
+        # saw (closing the model's inner one) got matched to the OUTER
+        # opening tag instead, silently absorbing everything in between
+        # into one quote block and dropping the real trailing content
+        # outside any quote at all. Not wrapping the answer avoids the
+        # conflict entirely; the recap lines above it still use blockquote
+        # normally since they never contain model-authored HTML.
         recap = "".join(f"\n<blockquote>🤔 {_h(t)}</blockquote>" for t in thoughts)
         await self._safe_edit(
             work_message,
-            f"<blockquote>💬 {_h(orig_question)}</blockquote>{recap}\n<blockquote>🤖 {answer}</blockquote>",
+            f"<blockquote>💬 {_h(orig_question)}</blockquote>{recap}\n🤖 {answer}",
             parse_mode="html",
         )
 

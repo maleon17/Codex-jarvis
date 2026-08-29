@@ -38,6 +38,25 @@ CODEX_CWD = os.environ.get("CODEX_JARVIS_CWD", "/home/mishin")
 CODEX_SANDBOX = os.environ.get("CODEX_JARVIS_SANDBOX", "danger-full-access")
 CODEX_MODEL = os.environ.get("CODEX_JARVIS_MODEL", "gpt-5.6-luna")
 CODEX_EFFORT = os.environ.get("CODEX_JARVIS_EFFORT", "low")
+# Tier 1 trigger classify (mirrors claude_watcher.py's CLASSIFY_MODEL="haiku"
+# for the "verify" trigger gate -- there's no Haiku equivalent on the Codex
+# side, so this is the cheap/fast tier for CodexAsk's own triggers instead).
+# Stateless, no persona, no MCP tools needed -- see CLASSIFY_PROMPT below.
+CODEX_CLASSIFY_MODEL = os.environ.get("CODEX_JARVIS_CLASSIFY_MODEL", "gpt-5.4")
+
+# Same 3-way (да/нет/не уверен) contract as claude_watcher.py's "classify"
+# mode -- codex_ask.py's _classify_condition parses the answer identically
+# regardless of which backend produced it, so the wording must match, not
+# just the intent.
+CLASSIFY_PROMPT = (
+    "Ты классификатор. Тебе дают условие и текст сообщения. Ответь "
+    "СТРОГО одним из трёх вариантов: 'да' (уверенно подходит под "
+    "условие), 'нет' (уверенно не подходит) или 'не уверен' "
+    "(сомнительный, пограничный случай) -- без пояснений, без "
+    "форматирования, без знаков препинания. Используй 'не уверен' "
+    "честно, когда действительно есть сомнение, а не только 'да'/'нет' "
+    "для перестраховки."
+)
 DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
 POLL_INTERVAL = float(os.environ.get("CODEX_JARVIS_POLL_INTERVAL", "0.35"))
 TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
@@ -524,13 +543,18 @@ class ChatSession:
             self.active = state
         try:
             thread_id = self._ensure_thread(mode == "chat")
-            prompt = f"{JARVIS_PROMPT}\n\nЗапрос пользователя:\n{question}"
+            if mode == "classify":
+                prompt = f"{CLASSIFY_PROMPT}\n\n{question}"
+                model = CODEX_CLASSIFY_MODEL
+            else:
+                prompt = f"{JARVIS_PROMPT}\n\nЗапрос пользователя:\n{question}"
+                model = CODEX_MODEL
             params = {
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": prompt}],
                 "cwd": CODEX_CWD,
                 "approvalPolicy": "never",
-                "model": CODEX_MODEL,
+                "model": model,
                 "effort": CODEX_EFFORT,
                 "sandboxPolicy": {
                     "type": "dangerFullAccess" if CODEX_SANDBOX == "danger-full-access" else (
