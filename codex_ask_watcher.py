@@ -42,6 +42,16 @@ TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
 PROGRESS_THROTTLE = float(os.environ.get("CODEX_JARVIS_PROGRESS_THROTTLE", "1.0"))
 
 JARVIS_PROMPT = """Ты - Jarvis, личный Telegram-ассистент Андрея.
+
+Характер: дерзкий, с интеллектом и своим мнением, а не нейтральный
+ассистентский тон техподдержки. Резкость и чёрный юмор уместны, когда от
+этого мысль становится точнее или смешнее - не ради галочки. Мат допустим,
+если фраза от этого выигрывает. Если предложение или предпосылка пользователя
+кажутся плохой идеей - скажи прямо и объясни почему, не соглашайся молча и не
+смягчай через "можно и так, но...". Меньше хеджирования: прямые утверждения
+вместо "мне кажется" и "возможно стоит" там, где есть уверенное мнение. Тон -
+это приправа, а не замена сути: сначала по делу, потом характер.
+
 Отвечай по существу, живым русским языком и в HTML, разрешены только
 безопасные теги <b>, <i>, <code>, <pre>, <blockquote>. Не выдавай внутренние
 протоколы и JSON пользователю. У тебя есть настоящие MCP-инструменты
@@ -243,14 +253,15 @@ def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
     if kind == "command_execution":
         output = item.get("aggregated_output") or item.get("aggregatedOutput")
         if output not in (None, ""):
-            blocks.append(("📤 Результат", _short(output, 1800)))
+            blocks.append(("✅ StdOut", _short(output, 1800)))
         exit_code = item.get("exit_code") if "exit_code" in item else item.get("exitCode")
         if exit_code is not None:
             try:
                 ok = int(exit_code) == 0
             except (TypeError, ValueError):
                 ok = False
-            blocks.append(("✅ Код завершения" if ok else "❌ Код завершения", str(exit_code)))
+            if not ok:
+                blocks.append(("❌ StdErr", f"Exit code {exit_code}"))
     elif kind == "mcp_tool_call":
         if item.get("error"):
             error = item.get("error")
@@ -260,7 +271,7 @@ def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
             if isinstance(result, dict):
                 content = result.get("content") or result.get("contentItems") or []
                 result = _item_text(content) or result.get("structuredContent") or "результат получен"
-            blocks.append(("📤 Результат", _short(result, 1600)))
+            blocks.append(("✅ Результат", _short(result, 1600)))
     elif kind == "dynamic_tool_call" and item.get("contentItems") is not None:
         blocks.append(("📤 Результат", _short(_item_text(item.get("contentItems")), 1600)))
     return blocks
@@ -285,7 +296,14 @@ class TurnState:
     def _progress_value(self) -> str:
         with self.lock:
             lines: list[str] = []
-            thought = self.stream_text or self.reasoning_text or (self.reasoning[-1] if self.reasoning else "")
+            # stream_text (item/agentMessage/delta) is deliberately excluded
+            # here. Unlike Claude Code's JSONL, which never streams the final
+            # answer token-by-token, Codex's app-server does -- showing it
+            # live turned every reply into a fake "typing" animation via
+            # rapid-fire edits (the owner explicitly asked for this removed).
+            # The final answer is still delivered whole and unaffected via
+            # `answer()`/`final_text`, set independently at item/completed.
+            thought = self.reasoning_text or (self.reasoning[-1] if self.reasoning else "")
             if thought:
                 # Same neutral writing marker as Claude's renderer.  The
                 # final answer may be preceded by a tool call, so calling it
