@@ -50,8 +50,9 @@ from herokutl.tl.functions.contacts import (
     AddContactRequest, DeleteContactsRequest, BlockRequest, UnblockRequest,
 )
 from herokutl.tl.types import (
-    MessageEntityUrl, MessageEntityTextUrl, Channel, ChannelParticipantsAdmins, Message,
+    MessageEntityUrl, MessageEntityTextUrl, Channel, ChannelParticipantsAdmins,
 )
+from herokutl.tl.custom import Message
 from herokutl.errors import UserPrivacyRestrictedError, UserNotParticipantError
 
 from .. import loader, utils
