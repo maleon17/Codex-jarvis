@@ -1,18 +1,18 @@
 [Unit]
 Description=Codex Jarvis userbot backend
-Documentation=file:///home/mishin/codex-jarvis/README.md
+Documentation=https://github.com/maleon17/Codex-jarvis
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=__USER__
-WorkingDirectory=/home/mishin/codex-jarvis
+WorkingDirectory=__INSTALL_DIR__
 Environment=PATH=/home/__USER__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=CODEX_HOME=/home/mishin/codex-jarvis/codex_home
-Environment=CODEX_JARVIS_CODEX_HOME=/home/mishin/codex-jarvis/codex_home
-Environment=CODEX_JARVIS_CWD=/home/mishin
-ExecStart=/usr/bin/python3 -u /home/mishin/codex-jarvis/codex_ask_watcher.py
+Environment=CODEX_HOME=__CODEX_HOME__
+Environment=CODEX_JARVIS_CODEX_HOME=__CODEX_HOME__
+Environment=CODEX_JARVIS_CWD=__CODEX_CWD__
+ExecStart=/usr/bin/python3 -u __INSTALL_DIR__/codex_ask_watcher.py
 Restart=always
 RestartSec=3
 KillMode=control-group

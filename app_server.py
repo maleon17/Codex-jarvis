@@ -40,7 +40,7 @@ class AppServerClient:
             threading.Thread(target=self._read_stdout, daemon=True).start()
             threading.Thread(target=self._read_stderr, daemon=True).start()
         self.request("initialize", {
-            "clientInfo": {"name": "codex-telegram-bot", "version": "0.2.0"},
+            "clientInfo": {"name": "codex-jarvis", "version": "0.1.0"},
             "capabilities": {"experimentalApi": True},
         })
         self.notify("initialized")

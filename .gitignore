@@ -3,3 +3,6 @@ codex_home/*
 state/
 *.log
 *.processing
+.venv/
+codex-config.toml
+codex-jarvis.service

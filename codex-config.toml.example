@@ -1,0 +1,9 @@
+# Generated into CODEX_HOME/config.toml by setup.sh.
+# Paths are substituted for the local checkout and MCP virtualenv.
+
+[mcp_servers.telegram_actions]
+command = "__MCP_PYTHON__"
+args = ["__INSTALL_DIR__/telegram_actions_mcp.py"]
+startup_timeout_sec = 20.0
+tool_timeout_sec = 40.0
+default_tools_approval_mode = "auto"
