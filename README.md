@@ -78,5 +78,4 @@ userbot/backend; общим остаётся лишь queue relay и namespace �
 
 ## Лицензия
 
-MIT, см. `LICENSE` в соседнем standalone Codex-проекте или добавь лицензию
-согласно политике своего развёртывания.
+MIT, см. `LICENSE`.
