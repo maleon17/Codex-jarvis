@@ -1,6 +1,5 @@
 __pycache__/
 codex_home/*
-!codex_home/config.toml
 state/
 *.log
 *.processing
