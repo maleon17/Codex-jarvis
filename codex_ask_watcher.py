@@ -36,6 +36,8 @@ SESSIONS_FILE = STATE_DIR / "sessions.json"
 CODEX_HOME = Path(os.environ.get("CODEX_JARVIS_CODEX_HOME", str(ROOT / "codex_home")))
 CODEX_CWD = os.environ.get("CODEX_JARVIS_CWD", "/home/mishin")
 CODEX_SANDBOX = os.environ.get("CODEX_JARVIS_SANDBOX", "danger-full-access")
+CODEX_MODEL = os.environ.get("CODEX_JARVIS_MODEL", "gpt-5.6-luna")
+CODEX_EFFORT = os.environ.get("CODEX_JARVIS_EFFORT", "low")
 DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
 POLL_INTERVAL = float(os.environ.get("CODEX_JARVIS_POLL_INTERVAL", "0.35"))
 TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
@@ -528,6 +530,8 @@ class ChatSession:
                 "input": [{"type": "text", "text": prompt}],
                 "cwd": CODEX_CWD,
                 "approvalPolicy": "never",
+                "model": CODEX_MODEL,
+                "effort": CODEX_EFFORT,
                 "sandboxPolicy": {
                     "type": "dangerFullAccess" if CODEX_SANDBOX == "danger-full-access" else (
                         "readOnly" if CODEX_SANDBOX == "read-only" else "workspaceWrite"
