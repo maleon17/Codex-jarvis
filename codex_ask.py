@@ -53,7 +53,7 @@ from herokutl.tl.types import (
     MessageEntityUrl, MessageEntityTextUrl, Channel, ChannelParticipantsAdmins,
 )
 from herokutl.tl.custom import Message
-from herokutl.errors import UserPrivacyRestrictedError, UserNotParticipantError
+from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotParticipantError
 
 from .. import loader, utils
 from .._internal import fw_protect
@@ -415,38 +415,41 @@ class CodexAsk(loader.Module):
         return await message.respond("⏳")
 
     async def _safe_edit(self, message, text, parse_mode=None):
-        try:
-            cur = getattr(message, "text", "") or getattr(message, "raw_text", "")
-            if cur != text:
-                if parse_mode:
-                    try:
-                        await message.edit(text, parse_mode=parse_mode)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        # Malformed HTML (e.g. an unescaped '<' buried in a
-                        # long model answer -- _dispatch_answer's answer
-                        # text isn't run through _h(), it's trusted as
-                        # already-valid HTML per the persona's own
-                        # instructions, but that trust isn't always
-                        # warranted) makes Telegram reject the parse
-                        # outright. Previously this silently discarded the
-                        # WHOLE edit, permanently freezing the message on
-                        # whatever was showing before -- often a stale
-                        # progress/spinner frame with no indication the
-                        # real answer ever arrived (confirmed live
-                        # 2026-08-27: a long-form answer got stuck on its
-                        # own "✍️" progress preview forever). Falling back
-                        # to a plain-text send guarantees the real content
-                        # reaches the user even if the tags show up raw --
-                        # ugly beats silently missing.
+        """Edit one existing work message and never create a replacement.
+
+        A transient edit FloodWait is awaited and retried on this same
+        message.  For malformed HTML we retry once without a parse mode.
+        Sending a reply here is deliberately forbidden: it leaves the old
+        ``Thinking`` bubble orphaned and makes the final answer appear as a
+        second message.
+        """
+        cur = getattr(message, "text", "") or getattr(message, "raw_text", "")
+        if cur == text:
+            return message
+
+        modes = [parse_mode] if not parse_mode else [parse_mode, None]
+        for mode in modes:
+            for attempt in range(2):
+                try:
+                    if mode:
+                        await message.edit(text, parse_mode=mode)
+                    else:
                         await message.edit(text)
-                else:
-                    await message.edit(text)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
+                    return message
+                except asyncio.CancelledError:
+                    raise
+                except FloodWaitError as exc:
+                    if attempt:
+                        break
+                    # Telegram tells us how long this account must wait;
+                    # honour it instead of replying with a second message.
+                    delay = max(1, int(getattr(exc, "seconds", 1) or 1))
+                    await asyncio.sleep(delay)
+                except Exception:
+                    # A parse-mode failure gets the plain-edit retry above;
+                    # other failures leave the same message untouched.
+                    break
+        return message
 
     async def _get_reply_text(self, message):
         rid = getattr(message, "reply_to_msg_id", None)
@@ -939,10 +942,12 @@ class CodexAsk(loader.Module):
     async def _poll_progress_and_result(self, message, req_id, animate=False):
         """Live-edits `message` with claude_watcher's streamed progress
         (thought/tool-call blocks) until it signals done, then returns
-        (answer, thoughts) -- thoughts is the list of intermediate
+        (message, answer, thoughts) -- thoughts is the list of intermediate
         reasoning steps banked by claude_watcher.py (each one that was
-        followed by a tool call), for the final recap. Returns (None, [])
-        on timeout.
+        followed by a tool call), for the final recap. Returns
+        (message, None, []) on timeout. The message is returned alongside
+        the result so every caller keeps one explicit work-message state;
+        `_safe_edit` never replaces it with a reply.
 
         `animate=True` (private chats only, see THINKING_SPINNER_FRAMES)
         cycles a Braille-spinner frame into `message` at ~0.5s cadence
@@ -997,16 +1002,16 @@ class CodexAsk(loader.Module):
             if d.get("request_id") is not None and d.get("request_id") != req_id:
                 continue
             if d.get("done"):
-                return d.get("answer"), (d.get("thoughts") or [])
+                return message, d.get("answer"), (d.get("thoughts") or [])
             progress = d.get("progress")
             if progress and progress != last_progress:
-                await self._safe_edit(message, progress, parse_mode="html")
+                message = await self._safe_edit(message, progress, parse_mode="html")
                 last_progress = progress
             elif animate and not last_progress:
                 frame = THINKING_SPINNER_FRAMES[frame_i % len(THINKING_SPINNER_FRAMES)]
                 frame_i += 1
-                await self._safe_edit(message, f"{_h(frame)} Thinking", parse_mode="html")
-        return None, []
+                message = await self._safe_edit(message, f"{_h(frame)} Thinking", parse_mode="html")
+        return message, None, []
 
     # The last of the text markers (SEARCH_CHAT/READ_HISTORY/LIST_TRIGGERS)
     # moved to real MCP tools 2026-08-11 -- see search_chat/read_history/
@@ -1816,18 +1821,36 @@ class CodexAsk(loader.Module):
 
     async def _list_triggers(self, chat_arg, chat_id):
         """Real list_triggers MCP tool handler (was the LIST_TRIGGERS text
-        marker, part of the old round-trip family)."""
+        marker, part of the old round-trip family).
+
+        chat="" or "this" means the CURRENT chat -- same convention as
+        register_trigger/edit_trigger's own chat handling. An explicit
+        "all"/"everywhere"/"все" is required for the old global-listing
+        behaviour. Previously empty meant "every chat", silently disagreeing
+        with every other trigger tool's "empty = this chat" convention --
+        a real live mix-up (2026-08-29): asked for "triggers in this chat",
+        got a plausible-looking list back for a DIFFERENT chat with no
+        error, because the model reasonably reused register_trigger's own
+        "empty = here" rule."""
         triggers = self._get_triggers()
-        if chat_arg:
+        chat_norm = (chat_arg or "").strip().lower()
+        if chat_norm in ("all", "everywhere", "все", "везде", "всех", "любой", "любые"):
+            items = [(cid, t) for cid, trigs in triggers.items() for t in trigs]
+        else:
             chat_target = await self._resolve_any_chat_target(chat_arg, chat_id)
             items = [(chat_target, t) for t in triggers.get(str(chat_target), [])] if chat_target is not None else []
-        else:
-            items = [(cid, t) for cid, trigs in triggers.items() for t in trigs]
         if not items:
             return "Активных триггеров нет."
         lines = []
         for cid, t in items:
-            chat_label = await self._chat_label(int(cid))
+            # cid comes straight from a stored dict key here (not from a
+            # freshly resolved entity id like elsewhere in this file) --
+            # a malformed/empty key must still be listed, not crash the
+            # whole call, so its trigger id stays visible/removable.
+            try:
+                chat_label = await self._chat_label(int(cid))
+            except (ValueError, TypeError):
+                chat_label = f"НЕИЗВЕСТНЫЙ ЧАТ (битый ключ {cid!r})"
             line = f"- id={t['id']}, [{t.get('engine', 'claude')}] чат «{chat_label}», {t['kind']} → {t['action']}: {t.get('label', '')}"
             exempt_bits = []
             if t.get("only_senders"):
@@ -1879,7 +1902,7 @@ class CodexAsk(loader.Module):
         )
         return f"✅ Удалено сообщений: {len(ids)}."
 
-    async def _classify_condition(self, condition, text):
+    async def _classify_condition(self, condition, text, allow_fallback=True):
         """Tier 1: 3-way ("yes"/"no"/"unsure") classification via
         cmd_queue.py's /xclassify, which routes to codex_ask_watcher.py's
         mode='classify' (CODEX_CLASSIFY_MODEL, gpt-5.4 as of 2026-08-29 --
@@ -1890,34 +1913,46 @@ class CodexAsk(loader.Module):
         for kind='semantic' triggers (rare, per the persona) AND as the
         verify-gate for keyword-prefiltered triggers (see
         _resolve_verified_action). "unsure" is a real third outcome, not an
-        error state -- any request failure/timeout also collapses to
-        "unsure" (fail safe: escalate to a human rather than silently act or
-        silently ignore)."""
+        error state.
+
+        cmd_queue.py's classify_semantic_codex can also return a distinct
+        "__unavailable__" sentinel (CLASSIFY_UNAVAILABLE there) instead of a
+        real verdict -- that means the call itself never got an answer
+        (queue write failed, or the timeout hit with no result, often the
+        account's flat-subscription limit), NOT that the model looked and
+        was genuinely unsure. A local network failure to /xclassify itself
+        is treated the same way. Unified 2026-08-30 with claude_ask.py's
+        identical method and the rest of the _fallback_backend/ENGINE
+        machinery -- this used to hand-roll its own retry straight against
+        FUNNEL/classify, bypassing the JarvisAsk coordinator entirely;
+        replaced with the same fallback() call every other cross-engine
+        retry in this file already goes through."""
         if not condition or not text:
             return "unsure"
         loop = asyncio.get_running_loop()
 
-        def call(path):
+        def call():
             data = json.dumps({"text": text[:2000], "condition": condition}).encode()
             req = urllib.request.Request(
-                f"{FUNNEL}/{path}", data=data,
+                f"{FUNNEL}/xclassify", data=data,
                 headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.loads(r.read())
 
         try:
-            result = await loop.run_in_executor(None, call, "xclassify")
-            return result.get("result") or "unsure"
+            result = await loop.run_in_executor(None, call)
+            verdict = result.get("result") or "unsure"
         except Exception:
-            # Fall back to Claude's classifier when the Codex worker/account
-            # is unavailable. A genuine "unsure" result above is preserved;
-            # only a failed request is retried on the other backend.
-            try:
-                result = await loop.run_in_executor(None, call, "classify")
-                return result.get("result") or "unsure"
-            except Exception:
-                return "unsure"
+            verdict = "__unavailable__"
+
+        if verdict == "__unavailable__":
+            if allow_fallback:
+                fallback = self._fallback_backend()
+                if fallback is not None:
+                    return await fallback._classify_condition(condition, text, allow_fallback=False)
+            return "unsure"
+        return verdict
 
     async def _resolve_verified_action(self, trig, message):
         """A keyword/link/button match already happened (cheap, free) --
@@ -2938,20 +2973,11 @@ class CodexAsk(loader.Module):
         chat_id = message.chat_id
         req_id = str(uuid.uuid4())
 
-        # Private chats get the Braille-spinner cycling animation
-        # (THINKING_SPINNER_FRAMES, via _poll_progress_and_result's
-        # `animate=True`); groups keep the static placeholder unchanged.
-        # See THINKING_SPINNER_FRAMES' own comment for why the split
-        # matters: a ticking edit-animation is what got this account
-        # banned from a GROUP once, so it's confined to 1:1 chats only --
-        # a deliberate, informed choice by the owner, not an oversight.
-        animate = bool(message.is_private)
-        if animate:
-            await self._safe_edit(
-                work_message, f"{_h(THINKING_SPINNER_FRAMES[0])} Thinking", parse_mode="html",
-            )
-        else:
-            await self._safe_edit(work_message, "🤔 Thinking", parse_mode="html")
+        # Keep one stable placeholder until real thought/tool progress
+        # arrives.  A half-second edit spinner trips Telegram's edit limit,
+        # which used to make the fallback send a second message.
+        animate = False
+        work_message = await self._safe_edit(work_message, "🤔 Думаю", parse_mode="html")
 
         # Telegram's own native "typing..." chat action, NOT a message-edit
         # animation -- a completely different mechanism from the banned
@@ -2985,7 +3011,9 @@ class CodexAsk(loader.Module):
         async with self._client.action(chat_id, "typing"):
             if self._enqueue(question, chat_id, req_id, mode, topic_id=topic_id, exclude_id=work_message.id):
                 enqueued = True
-                answer, thoughts = await self._poll_progress_and_result(work_message, req_id, animate=animate)
+                work_message, answer, thoughts = await self._poll_progress_and_result(
+                    work_message, req_id, animate=animate,
+                )
 
         if allow_fallback and (not enqueued or self._backend_failed(answer)):
             fallback = self._fallback_backend()
@@ -3033,9 +3061,9 @@ class CodexAsk(loader.Module):
         # _h(t): thoughts are raw model scratch text, NOT guaranteed valid
         # HTML like the final answer is -- an unescaped '<' here used to
         # corrupt this whole edit's entity structure (Telegram rejects the
-        # parse, _safe_edit swallows the exception), which is why a chain
-        # of several thoughts could end up showing only the last one (or
-        # none) instead of one blockquote per thought as intended.
+        # parse, _safe_edit keeps the existing message unchanged), which is
+        # why a chain of several thoughts could end up showing only the last
+        # one (or none) instead of one blockquote per thought as intended.
         # `answer` is the model's own HTML and is explicitly allowed to use
         # <blockquote> itself (see the persona's allowed-tags list) -- it
         # used to be wrapped in an outer <blockquote> here too, and Telegram
@@ -3083,7 +3111,7 @@ class CodexAsk(loader.Module):
         if not kw:
             await self._safe_edit(work_message, "⚠️ <b>.xsearch</b> &lt;слово&gt;", parse_mode="html")
             return
-        await self._safe_edit(work_message, f"🔍 Ищу «{kw}»...")
+        work_message = await self._safe_edit(work_message, f"🔍 Ищу «{kw}»...")
         try:
             results = await self._search_chat(message.chat_id, kw, topic_id=self._topic_of(message))
         except Exception as e:

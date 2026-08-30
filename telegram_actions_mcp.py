@@ -311,8 +311,10 @@ def edit_trigger(trigger_id: str, updates: dict) -> str:
 
 @mcp.tool()
 def list_triggers(chat: str = "") -> str:
-    """Показать активные автоматические триггеры. chat -- пусто = все чаты
-    сразу, иначе только конкретный (id/@username/точное название/'this')."""
+    """Показать активные автоматические триггеры. chat -- пусто/'this' =
+    ТЕКУЩИЙ чат (та же конвенция, что у register_trigger/edit_trigger),
+    иначе конкретный чат (id/@username/точное название). Чтобы увидеть
+    триггеры СРАЗУ ВО ВСЕХ чатах -- передай ИМЕННО "all" (не пусто)."""
     return _call_tool("list_triggers", {"chat": chat})
 
 
