@@ -1,6 +1,12 @@
 import unittest
 
-from codex_ask_watcher import TurnState, _item_label
+from codex_ask_watcher import (
+    INTERNAL_TOOL_RESULT_PREFIX,
+    JARVIS_PROMPT,
+    TurnState,
+    _item_label,
+    _item_result_blocks,
+)
 
 
 class ProgressRenderingTests(unittest.TestCase):
@@ -31,6 +37,14 @@ class ProgressRenderingTests(unittest.TestCase):
         progress = state.progress()
         self.assertIn("✍️ Готово", progress)
         self.assertNotIn("🤔", progress)
+
+    def test_internal_permission_result_stays_out_of_progress(self):
+        result = f"{INTERNAL_TOOL_RESULT_PREFIX} Действие заблокировано"
+        self.assertEqual(
+            _item_result_blocks({"type": "mcp_tool_call", "result": result}),
+            [],
+        )
+        self.assertIn(INTERNAL_TOOL_RESULT_PREFIX, JARVIS_PROMPT)
 
 
 if __name__ == "__main__":

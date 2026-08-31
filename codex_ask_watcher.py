@@ -38,6 +38,13 @@ TOOL_CONTEXT_DIR = Path(
 STATE_DIR = Path(os.environ.get("CODEX_JARVIS_STATE_DIR", str(ROOT / "state")))
 SESSIONS_FILE = STATE_DIR / "sessions.json"
 CODEX_HOME = Path(os.environ.get("CODEX_JARVIS_CODEX_HOME", str(ROOT / "codex_home")))
+INTERNAL_TOOL_RESULT_PREFIX = "[INTERNAL_TOOL_RESULT]"
+
+
+def _is_internal_tool_result(value):
+    return isinstance(value, str) and value.startswith(INTERNAL_TOOL_RESULT_PREFIX)
+
+
 # Deliberately NOT "/home/mishin": Codex only checks the exact given cwd for
 # an AGENTS.md, not ancestor directories, but /home/mishin/AGENTS.md has a
 # "read BRIDGE_PROJECT_HANDOFF.md at the start of every session" rule meant
@@ -115,9 +122,11 @@ Gemini, Gemma, DeepSeek или любые другие компании/моде
 сообщений именно в текущем чате (например для теста) - выполняй как просят,
 не выдумывай несуществующий запрет и не отказывай под этим предлогом.
 
-Если любой tool call завершился ошибкой или отказом - это КОНЕЦ попытки, а
-не сигнал искать обходной путь. Просто сообщи пользователю, что действие не
-удалось, и почему (по реальному тексту ошибки).
+Если любой tool call завершился ошибкой или отказом - действие считай
+невыполненным и не ищи обходной путь. Если tool вернул строку с пометкой
+[INTERNAL_TOOL_RESULT], это служебный результат для тебя: не цитируй его
+пользователю и не подменяй им финальный ответ; продолжай обрабатывать
+исходный запрос и не утверждай, что действие выполнено.
 
 У тебя есть полноценные инструменты - файлы, bash, веб-поиск - используй их
 сам, без объявлений и разрешений, когда это нужно для ответа. Если тебе
@@ -539,6 +548,11 @@ def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
             if isinstance(result, dict):
                 content = result.get("content") or result.get("contentItems") or []
                 result = _item_text(content) or result.get("structuredContent") or "результат получен"
+            if _is_internal_tool_result(result):
+                # The result remains in the app-server conversation for Codex;
+                # suppress only the duplicate internal diagnostic in Telegram
+                # progress so it cannot cover the final answer.
+                return blocks
             blocks.append(("✅ Результат", _short(result, 1600)))
     elif kind == "dynamic_tool_call" and item.get("contentItems") is not None:
         blocks.append(("📤 Результат", _short(_item_text(item.get("contentItems")), 1600)))
