@@ -25,6 +25,9 @@ class ProgressRenderingTests(unittest.TestCase):
         state.add_notification("item/agentMessage/delta", {
             "itemId": "agent-1", "delta": "Готово",
         })
+        state.add_notification("item/started", {
+            "item": {"type": "command_execution", "id": "tool-1", "command": "printf hello"},
+        })
         progress = state.progress()
         self.assertIn("✍️ Готово", progress)
         self.assertNotIn("🤔", progress)

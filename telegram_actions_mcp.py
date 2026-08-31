@@ -24,6 +24,7 @@ for exactly this purpose (same trick bridge.py already uses for its own
 wakeup-signal mechanism) -- so the model never has to know or pass the
 current chat/topic/its-own-placeholder-message id itself.
 """
+import hashlib
 import json
 import os
 import time
@@ -41,6 +42,8 @@ POLL_INTERVAL_S = 0.5
 # owner's legacy values; prefer the dynamic per-process context when present.
 INSTANCE_ID = os.environ.get("CODEX_TELEGRAM_INSTANCE_ID") or os.environ.get("INSTANCE_ID", "andrey")
 CHAT_ID = os.environ.get("CODEX_TELEGRAM_CHAT_ID") or os.environ.get("CHAT_ID", "")
+REQUESTER_ID = os.environ.get("CODEX_TELEGRAM_REQUESTER_ID") or os.environ.get("REQUESTER_ID", "")
+CONTEXT_DIR = os.environ.get("CODEX_TELEGRAM_CONTEXT_DIR")
 TOPIC_ID = int(os.environ.get("CODEX_TELEGRAM_TOPIC_ID") or os.environ["TOPIC_ID"]) if (
     os.environ.get("CODEX_TELEGRAM_TOPIC_ID") or os.environ.get("TOPIC_ID")
 ) else None
@@ -51,11 +54,24 @@ EXCLUDE_MSG_ID = int(os.environ.get("CODEX_TELEGRAM_EXCLUDE_MSG_ID") or os.envir
 mcp = MCPServer("telegram-actions")
 
 
+def _current_requester_id():
+    if not CONTEXT_DIR:
+        return REQUESTER_ID
+    key = f"{INSTANCE_ID}\0{CHAT_ID}".encode("utf-8")
+    path = os.path.join(CONTEXT_DIR, f"{hashlib.sha256(key).hexdigest()}.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle).get("requester_id")
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return ""
+    return "" if value is None else str(value)
+
+
 def _call_tool(tool: str, args: dict) -> str:
     req_id = str(uuid.uuid4())
     body = json.dumps({
         "request_id": req_id, "instance_id": INSTANCE_ID, "chat_id": CHAT_ID,
-        "tool": tool, "args": args,
+        "requester_id": _current_requester_id(), "tool": tool, "args": args,
     }).encode()
     try:
         urllib.request.urlopen(

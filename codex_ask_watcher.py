@@ -15,6 +15,7 @@ Telegram actions are exposed by the sibling MCP server; the CodexAsk module's
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -31,6 +32,9 @@ ROOT = Path(__file__).resolve().parent
 QUEUE_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_QUEUE", "/tmp/hermes_xask_queue"))
 RESULT_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_RESULT", "/tmp/hermes_xask_result"))
 RESET_DIR = Path(os.environ.get("CODEX_JARVIS_XRESET_QUEUE", "/tmp/hermes_xask_reset"))
+TOOL_CONTEXT_DIR = Path(
+    os.environ.get("CODEX_JARVIS_TOOL_CONTEXT_DIR", "/tmp/hermes_tool_context")
+)
 STATE_DIR = Path(os.environ.get("CODEX_JARVIS_STATE_DIR", str(ROOT / "state")))
 SESSIONS_FILE = STATE_DIR / "sessions.json"
 CODEX_HOME = Path(os.environ.get("CODEX_JARVIS_CODEX_HOME", str(ROOT / "codex_home")))
@@ -327,7 +331,7 @@ def log(message: str) -> None:
 
 
 def ensure_dirs() -> None:
-    for path in (QUEUE_DIR, RESULT_DIR, RESET_DIR, STATE_DIR, CODEX_HOME):
+    for path in (QUEUE_DIR, RESULT_DIR, RESET_DIR, TOOL_CONTEXT_DIR, STATE_DIR, CODEX_HOME):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
@@ -338,6 +342,11 @@ def _atomic_json(path: Path, value: dict) -> None:
         json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def _tool_context_path(instance_id: str, chat_id: str) -> Path:
+    key = f"{instance_id}\0{chat_id}".encode("utf-8")
+    return TOOL_CONTEXT_DIR / f"{hashlib.sha256(key).hexdigest()}.json"
 
 
 class SessionIndex:
@@ -712,8 +721,10 @@ class ChatSession:
         self.chat_id = chat_id
         self.index = index
         self.lock = threading.RLock()
+        self.turn_lock = threading.Lock()
         self.active: TurnState | None = None
         self.thread_id = index.get(instance_id, chat_id)
+        self.tool_context_path = _tool_context_path(instance_id, chat_id)
         env = dict(os.environ)
         env["CODEX_HOME"] = str(CODEX_HOME)
         # Kept on the app-server's OWN process env for reference, but this is
@@ -729,10 +740,12 @@ class ChatSession:
         # extra_args and codex app-server --help's own -c documentation.
         env["CODEX_TELEGRAM_CHAT_ID"] = str(chat_id)
         env["CODEX_TELEGRAM_INSTANCE_ID"] = str(instance_id)
+        env["CODEX_TELEGRAM_CONTEXT_DIR"] = str(TOOL_CONTEXT_DIR)
         mcp_env_override = (
             "mcp_servers.telegram_actions.env="
             '{CODEX_TELEGRAM_CHAT_ID="' + str(chat_id).replace("\\", "\\\\").replace('"', '\\"') + '",'
-            'CODEX_TELEGRAM_INSTANCE_ID="' + str(instance_id).replace("\\", "\\\\").replace('"', '\\"') + '"}'
+            'CODEX_TELEGRAM_INSTANCE_ID="' + str(instance_id).replace("\\", "\\\\").replace('"', '\\"') + '",'
+            'CODEX_TELEGRAM_CONTEXT_DIR="' + str(TOOL_CONTEXT_DIR).replace("\\", "\\\\").replace('"', '\\"') + '"}'
         )
         self.client = AppServerClient(
             self._notification, lambda msg: log(f"{instance_id}:{chat_id} {msg}"), env=env,
@@ -784,6 +797,14 @@ class ChatSession:
         return thread
 
     def handle(self, request: dict) -> None:
+        # Codex app-server has one active turn per thread.  Queue files can
+        # arrive concurrently for the same chat, so serialize the whole
+        # request instead of letting turns overwrite ``self.active`` and
+        # each other's tool-call context.
+        with self.turn_lock:
+            self._handle(request)
+
+    def _handle(self, request: dict) -> None:
         req_id = str(request.get("request_id") or uuid.uuid4())
         mode = str(request.get("mode") or "chat")
         question = str(request.get("question") or "").strip()
@@ -795,6 +816,18 @@ class ChatSession:
         state = TurnState(req_id)
         with self.lock:
             self.active = state
+        if mode == "chat":
+            try:
+                _atomic_json(self.tool_context_path, {
+                    "request_id": req_id,
+                    "requester_id": request.get("requester_id"),
+                })
+            except Exception as exc:
+                log(f"{self.instance_id}:{self.chat_id} tool context unavailable: {exc}")
+                try:
+                    self.tool_context_path.unlink()
+                except FileNotFoundError:
+                    pass
         try:
             thread_id = self._ensure_thread(mode == "chat")
             if mode == "classify":
@@ -847,6 +880,13 @@ class ChatSession:
         finally:
             with self.lock:
                 self.active = None
+            try:
+                with self.tool_context_path.open(encoding="utf-8") as handle:
+                    context = json.load(handle)
+                if context.get("request_id") == req_id:
+                    self.tool_context_path.unlink()
+            except (FileNotFoundError, OSError, ValueError, TypeError):
+                pass
 
     def close(self) -> None:
         self.client.close()
