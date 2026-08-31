@@ -11,11 +11,12 @@ class AppServerError(RuntimeError):
 
 
 class AppServerClient:
-    def __init__(self, notification_handler, log, request_timeout=30, env=None):
+    def __init__(self, notification_handler, log, request_timeout=30, env=None, extra_args=None):
         self.notification_handler = notification_handler
         self.log = log
         self.request_timeout = request_timeout
         self.env = env
+        self.extra_args = list(extra_args or [])
         self.process = None
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -29,7 +30,7 @@ class AppServerClient:
                 return
             self._closed_error = None
             self.process = subprocess.Popen(
-                ["codex", "app-server", "--listen", "stdio://"],
+                ["codex", "app-server", *self.extra_args, "--listen", "stdio://"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

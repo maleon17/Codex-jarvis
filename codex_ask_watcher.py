@@ -101,19 +101,19 @@ Gemini, Gemma, DeepSeek или любые другие компании/моде
 никакого tool call вообще - твой обычный текстовый ответ САМ становится
 видимым сообщением в этом чате, автоматически, сразу после того как ты его
 написал. Если тебя просят "поздоровайся", "напиши в чат", "ответь всем" и
-т.п. - просто ответь текстом, ничего вызывать не надо. send_message и
-send_message_as_bot предназначены ТОЛЬКО для ДРУГИХ чатов (не того, откуда
-пришёл вопрос) и правильно откажутся, если в target передать текущий чат -
-это не баг и не то, что нужно обходить, это значит что ты пытаешься сделать
-что-то, что уже происходит само.
+т.п. - просто ответь текстом, ничего вызывать не надо. По умолчанию не
+используй send_message/send_message_as_bot для ТЕКУЩЕГО чата - но это НЕ
+техническое ограничение (тул технически может отправить и в текущий чат,
+никакого отказа на этом коде нет), а твоя собственная привычка по умолчанию:
+раньше вместо обычного ответа ты иногда сам, без просьбы, слал сообщения
+через этот протокол - поэтому по умолчанию просто отвечай текстом. Но если
+пользователь ЯВНО просит использовать send_message/несколько отдельных
+сообщений именно в текущем чате (например для теста) - выполняй как просят,
+не выдумывай несуществующий запрет и не отказывай под этим предлогом.
 
 Если любой tool call завершился ошибкой или отказом - это КОНЕЦ попытки, а
-не сигнал искать обходной путь. Категорически ЗАПРЕЩЕНО читать любые файлы
-с токенами/паролями/API-ключами (включая BRIDGE_PROJECT_HANDOFF.md) и
-использовать найденное там для прямых HTTP-запросов или любых других
-действий в обход отказавшего инструмента - это чужие боевые credentials, не
-твой запасной план. Просто сообщи пользователю, что действие не удалось, и
-почему (по реальному тексту ошибки), и всё.
+не сигнал искать обходной путь. Просто сообщи пользователю, что действие не
+удалось, и почему (по реальному тексту ошибки).
 
 У тебя есть полноценные инструменты - файлы, bash, веб-поиск - используй их
 сам, без объявлений и разрешений, когда это нужно для ответа. Если тебе
@@ -707,12 +707,28 @@ class ChatSession:
         self.thread_id = index.get(instance_id, chat_id)
         env = dict(os.environ)
         env["CODEX_HOME"] = str(CODEX_HOME)
-        # The MCP server uses these variables to scope Telegram tools to the
-        # originating userbot account/chat.  They are per app-server process,
-        # hence one child per chat/instance.
+        # Kept on the app-server's OWN process env for reference, but this is
+        # NOT what actually reaches telegram_actions_mcp.py: Codex does not
+        # forward arbitrary custom env vars from the app-server process to
+        # the MCP server subprocesses it spawns per mcp_servers config
+        # (confirmed live 2026-08-30 -- CHAT_ID arrived as "" in the MCP
+        # server no matter what was set here, breaking every chat/instance-
+        # scoped tool call with "invalid literal for int() with base 10:
+        # ''"). What Codex DOES honor is an explicit env table on the
+        # mcp_servers.<name> config entry itself, passed below as a -c
+        # override on the app-server invocation -- see AppServerClient's
+        # extra_args and codex app-server --help's own -c documentation.
         env["CODEX_TELEGRAM_CHAT_ID"] = str(chat_id)
         env["CODEX_TELEGRAM_INSTANCE_ID"] = str(instance_id)
-        self.client = AppServerClient(self._notification, lambda msg: log(f"{instance_id}:{chat_id} {msg}"), env=env)
+        mcp_env_override = (
+            "mcp_servers.telegram_actions.env="
+            '{CODEX_TELEGRAM_CHAT_ID="' + str(chat_id).replace("\\", "\\\\").replace('"', '\\"') + '",'
+            'CODEX_TELEGRAM_INSTANCE_ID="' + str(instance_id).replace("\\", "\\\\").replace('"', '\\"') + '"}'
+        )
+        self.client = AppServerClient(
+            self._notification, lambda msg: log(f"{instance_id}:{chat_id} {msg}"), env=env,
+            extra_args=["-c", mcp_env_override],
+        )
 
     def _notification(self, method: str, params: dict) -> None:
         with self.lock:
