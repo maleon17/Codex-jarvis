@@ -11,7 +11,7 @@
 #
 # Rewrite of JarvisAsk (jarvis_ask.py): same UX (.xask/.xsearch/.xtranslate/.xnew,
 # in-place message editing so it looks like the user typed it themselves),
-# same "hosting connection" (Funnel HTTP endpoints -> cmd_queue.py -> queue
+# same "hosting connection" (backend HTTP endpoints -> cmd_queue.py -> queue
 # files), backend swapped to the separate codex_ask_watcher.py. See that
 # file's docstring for
 # why most of the old 8-tool client marker surface is gone.
@@ -63,17 +63,19 @@ from .._internal import fw_protect
 # Tailscale Funnel URL, which this userbot host's outbound path to the
 # funnel's edge IP range stopped completing TLS handshakes on (verified:
 # general internet fine, only that specific edge range affected).
-FUNNEL = os.environ.get("CODEX_JARVIS_FUNNEL", "http://100.98.146.81:9092")
+BACKEND_URL = os.environ.get(
+    "CODEX_JARVIS_BACKEND_URL", "http://100.98.146.81:9092"
+)
+HTTP_PROXY = os.environ.get("CODEX_JARVIS_HTTP_PROXY", "http://localhost:1056")
 
 # tailscaled here runs with --tun=userspace-networking (no /dev/net/tun in
 # this container), so normal socket connections don't reach the tailnet by
 # themselves -- route every urllib request through its local HTTP CONNECT
 # proxy (--outbound-http-proxy-listen=localhost:1056) instead.
-urllib.request.install_opener(
-    urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": "http://localhost:1056"})
+if HTTP_PROXY:
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler({"http": HTTP_PROXY}))
     )
-)
 # Explicit now (was implicit -- claude_watcher.py defaulted a missing
 # instance_id to "andrey"), matching claude_ask_anatoly.py's structure
 # exactly. No functional change, just removes the one remaining asymmetry
@@ -239,6 +241,8 @@ class CodexAsk(loader.Module):
     # -- Forum topics (Phase 1 infra) -----------------------------------------
 
     async def client_ready(self):
+        global BACKEND_URL, HTTP_PROXY, INSTANCE_ID
+
         self._topics = {}
         self._owner_id_cache = None
         # chat_id -> asyncio.Lock, serializes action=agent/reply trigger
@@ -256,8 +260,28 @@ class CodexAsk(loader.Module):
         # (which _reply_to_origin delivers silently via self._client) --
         # only the second case needs its own extra push.
         self._agent_turn_sent = {}
+        network = self.db.get("CodexAsk", "network", None)
+        if isinstance(network, dict):
+            BACKEND_URL = network.get("backend_url", BACKEND_URL)
+            HTTP_PROXY = network.get("http_proxy", HTTP_PROXY)
+            INSTANCE_ID = network.get("instance_id", INSTANCE_ID)
+            if HTTP_PROXY:
+                urllib.request.install_opener(
+                    urllib.request.build_opener(
+                        urllib.request.ProxyHandler({"http": HTTP_PROXY})
+                    )
+                )
+            else:
+                urllib.request.install_opener(urllib.request.build_opener())
         await self._ensure_topics()
-        await asyncio.to_thread(self._ensure_tailnet)
+        # Same-host deployments do not need tailscaled and may not have its
+        # binary installed. A live sibling deployment hit FileNotFoundError
+        # for `tailscaled` on 2026-09-01; that must not break module loading.
+        if HTTP_PROXY:
+            try:
+                await asyncio.to_thread(self._ensure_tailnet)
+            except Exception:
+                pass
 
     def _agent_trigger_lock(self, chat_id):
         return self._agent_trigger_locks.setdefault(chat_id, asyncio.Lock())
@@ -299,7 +323,7 @@ class CodexAsk(loader.Module):
         in this container) on every module load. This container has no init
         system besides docker-init -- `python3 -m heroku` (which reloads this
         module) is the only thing guaranteed to run again after a container
-        restart, so the tailnet path FUNNEL relies on has to be re-armed from
+        restart, so the tailnet path BACKEND_URL relies on has to be re-armed from
         here, not from a systemd unit that doesn't exist. Idempotent: a live
         tailscaled is left alone.
         """
@@ -541,7 +565,7 @@ class CodexAsk(loader.Module):
 
         def upload():
             req = urllib.request.Request(
-                f"{FUNNEL}/upload", data=body,
+                f"{BACKEND_URL}/upload", data=body,
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                 method="POST",
             )
@@ -958,7 +982,7 @@ class CodexAsk(loader.Module):
             data = json.dumps(payload).encode()
             urllib.request.urlopen(
                 urllib.request.Request(
-                    f"{FUNNEL}/xask", data=data,
+                    f"{BACKEND_URL}/xask", data=data,
                     headers={"Content-Type": "application/json"}, method="POST",
                 ),
                 timeout=5,
@@ -976,7 +1000,7 @@ class CodexAsk(loader.Module):
         host, no funnel) while this side has to poll for work instead of
         being pushed to."""
         qs = urllib.parse.urlencode({"instance_id": INSTANCE_ID})
-        req = urllib.request.Request(f"{FUNNEL}/tool_call_pending?{qs}")
+        req = urllib.request.Request(f"{BACKEND_URL}/tool_call_pending?{qs}")
         with urllib.request.urlopen(req, timeout=5) as r:
             return json.loads(r.read())
 
@@ -984,7 +1008,7 @@ class CodexAsk(loader.Module):
         data = json.dumps({"request_id": request_id, "result": result}).encode()
         urllib.request.urlopen(
             urllib.request.Request(
-                f"{FUNNEL}/tool_call_result", data=data,
+                f"{BACKEND_URL}/tool_call_result", data=data,
                 headers={"Content-Type": "application/json"}, method="POST",
             ),
             timeout=5,
@@ -995,7 +1019,7 @@ class CodexAsk(loader.Module):
         # chat), each with its own result file keyed by request_id -- the
         # relay needs to know which one to fetch.
         qs = urllib.parse.urlencode({"request_id": req_id})
-        req = urllib.request.Request(f"{FUNNEL}/xask?{qs}")
+        req = urllib.request.Request(f"{BACKEND_URL}/xask?{qs}")
         with urllib.request.urlopen(req, timeout=3) as r:
             return json.loads(r.read())
 
@@ -1119,7 +1143,7 @@ class CodexAsk(loader.Module):
 
             def fetch():
                 req = urllib.request.Request(
-                    f"{FUNNEL}/download?path={urllib.parse.quote(path)}"
+                    f"{BACKEND_URL}/download?path={urllib.parse.quote(path)}"
                 )
                 with urllib.request.urlopen(req, timeout=60) as r:
                     return r.read()
@@ -2145,7 +2169,7 @@ class CodexAsk(loader.Module):
         is treated the same way. Unified 2026-08-30 with claude_ask.py's
         identical method and the rest of the _fallback_backend/ENGINE
         machinery -- this used to hand-roll its own retry straight against
-        FUNNEL/classify, bypassing the JarvisAsk coordinator entirely;
+        BACKEND_URL/classify, bypassing the JarvisAsk coordinator entirely;
         replaced with the same fallback() call every other cross-engine
         retry in this file already goes through."""
         if not condition or not text:
@@ -2155,7 +2179,7 @@ class CodexAsk(loader.Module):
         def call():
             data = json.dumps({"text": text[:2000], "condition": condition}).encode()
             req = urllib.request.Request(
-                f"{FUNNEL}/xclassify", data=data,
+                f"{BACKEND_URL}/xclassify", data=data,
                 headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -2984,7 +3008,7 @@ class CodexAsk(loader.Module):
             coordinator = self.lookup("JarvisAsk")
         except Exception:
             coordinator = None
-        if coordinator is not None:
+        if coordinator:
             await coordinator.handle_message(message, ENGINE, self)
             return
         if not isinstance(message, Message):
@@ -3453,6 +3477,79 @@ class CodexAsk(loader.Module):
     # -- Commands -------------------------------------------------------------
 
     @loader.command()
+    async def xasknet(self, message):
+        """Настроить сеть CodexAsk для этого экземпляра"""
+        global BACKEND_URL, HTTP_PROXY, INSTANCE_ID
+
+        usage = (
+            "<b>.xasknet</b> — текущая конфигурация и справка\n"
+            "<code>.xasknet local &lt;instance_id&gt;</code>\n"
+            "<code>.xasknet tailnet &lt;instance_id&gt; &lt;backend_url&gt;</code>\n"
+            "<code>.xasknet custom &lt;instance_id&gt; &lt;backend_url&gt; &lt;proxy_url|none&gt;</code>"
+        )
+
+        def config_text(prefix):
+            proxy = HTTP_PROXY or "disabled"
+            return (
+                f"{prefix}\n"
+                f"instance_id: <code>{_h(INSTANCE_ID)}</code>\n"
+                f"backend_url: <code>{_h(BACKEND_URL)}</code>\n"
+                f"http_proxy: <code>{_h(proxy)}</code>"
+            )
+
+        args = utils.get_args_raw(message).split()
+        work_message = await self._work_message(message)
+        if not args:
+            await self._safe_edit(
+                work_message, config_text(usage), parse_mode="html"
+            )
+            return
+
+        mode = args[0].lower()
+        if mode == "local" and len(args) == 2:
+            instance_id, backend_url, http_proxy = (
+                args[1], "http://127.0.0.1:9092", None
+            )
+        elif mode == "tailnet" and len(args) == 3:
+            instance_id, backend_url, http_proxy = (
+                args[1], args[2], "http://localhost:1056"
+            )
+        elif mode == "custom" and len(args) == 4:
+            instance_id, backend_url = args[1], args[2]
+            http_proxy = None if args[3].lower() == "none" else args[3]
+        else:
+            await self._safe_edit(work_message, usage, parse_mode="html")
+            return
+
+        if not instance_id or not backend_url.startswith(("http://", "https://")):
+            await self._safe_edit(work_message, usage, parse_mode="html")
+            return
+
+        BACKEND_URL = backend_url
+        HTTP_PROXY = http_proxy
+        INSTANCE_ID = instance_id
+        self.db.set(
+            "CodexAsk", "network",
+            {
+                "instance_id": INSTANCE_ID,
+                "backend_url": BACKEND_URL,
+                "http_proxy": HTTP_PROXY,
+            },
+        )
+        if HTTP_PROXY:
+            urllib.request.install_opener(
+                urllib.request.build_opener(
+                    urllib.request.ProxyHandler({"http": HTTP_PROXY})
+                )
+            )
+        else:
+            urllib.request.install_opener(urllib.request.build_opener())
+        await self._safe_edit(
+            work_message, config_text("✅ Сетевая конфигурация применена:"),
+            parse_mode="html",
+        )
+
+    @loader.command()
     async def xask(self, message):
         """<вопрос> — спросить Jarvis через Codex"""
         # get_args_raw, NOT get_args: get_args runs the text through
@@ -3522,7 +3619,7 @@ class CodexAsk(loader.Module):
 
             def do_reset():
                 req = urllib.request.Request(
-                    f"{FUNNEL}/xreset", data=data,
+                    f"{BACKEND_URL}/xreset", data=data,
                     headers={"Content-Type": "application/json"}, method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=5) as r:
