@@ -5,8 +5,6 @@
 # the single place that knows which backend is preferred for a trigger and
 # which one is the safe fallback when the preferred account is unavailable.
 
-import re
-
 from herokutl.tl.custom import Message
 
 from .. import loader
@@ -16,16 +14,18 @@ ENGINE_CLAUDE = "claude"
 ENGINE_CODEX = "codex"
 ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX)
 
-# These are user-visible worker errors, not ordinary model prose.  A trigger
-# request must be retried on the other subscription when one of these is
-# returned; an arbitrary answer containing a word like "лимит" must not be
-# treated as a transport failure.
-BACKEND_FAILURE_RE = re.compile(
-    r"(?:лимит аккаунта|usage limit|rate limit|rate_limit|quota|исчерпан|"
-    r"hit your limit|you(?:'|’)ve hit|не завершил запрос|"
-    r"ошиб(?:ка|ки) (?:воркера|codex)|ошибка подключения|таймаут|timeout|"
-    r"worker error|service unavailable|internal server error)",
-    re.IGNORECASE,
+# These are user-visible worker errors, not ordinary model prose.  Keep this
+# allowlist tied to prefixes emitted by the internal workers: matching a
+# keyword anywhere in an answer can mistake a legitimate explanation of rate
+# limits or quotas for a transport failure and incorrectly repeat a trigger.
+BACKEND_FAILURE_PREFIXES = (
+    "Ошибка воркера:",
+    "⚠️ Ошибка Codex:",
+    "⚠️ Ошибка очереди:",
+    "⚠️ Codex не завершил запрос за отведённое время.",
+    "⚠️ Лимит аккаунта Codex исчерпан.",
+    "⚠️ Бюджет этой сессии исчерпан.",
+    "⚠️ Контекст сессии исчерпан.",
 )
 
 
@@ -55,7 +55,7 @@ class JarvisAsk(loader.Module):
 
     @staticmethod
     def is_failure(answer):
-        return isinstance(answer, str) and bool(BACKEND_FAILURE_RE.search(answer))
+        return isinstance(answer, str) and answer.strip().startswith(BACKEND_FAILURE_PREFIXES)
 
     def engine_for_trigger(self, trigger, default=ENGINE_CLAUDE):
         engine = str((trigger or {}).get("engine") or default).lower()
