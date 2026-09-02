@@ -29,11 +29,11 @@ from app_server import AppServerClient, AppServerError
 
 
 ROOT = Path(__file__).resolve().parent
-QUEUE_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_QUEUE", "/tmp/hermes_xask_queue"))
-RESULT_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_RESULT", "/tmp/hermes_xask_result"))
-RESET_DIR = Path(os.environ.get("CODEX_JARVIS_XRESET_QUEUE", "/tmp/hermes_xask_reset"))
+QUEUE_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_QUEUE", "/tmp/jarvisask_xask_queue"))
+RESULT_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_RESULT", "/tmp/jarvisask_xask_result"))
+RESET_DIR = Path(os.environ.get("CODEX_JARVIS_XRESET_QUEUE", "/tmp/jarvisask_xask_reset"))
 TOOL_CONTEXT_DIR = Path(
-    os.environ.get("CODEX_JARVIS_TOOL_CONTEXT_DIR", "/tmp/hermes_tool_context")
+    os.environ.get("CODEX_JARVIS_TOOL_CONTEXT_DIR", "/tmp/jarvisask_tool_context")
 )
 STATE_DIR = Path(os.environ.get("CODEX_JARVIS_STATE_DIR", str(ROOT / "state")))
 SESSIONS_FILE = STATE_DIR / "sessions.json"

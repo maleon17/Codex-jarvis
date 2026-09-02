@@ -29,8 +29,8 @@ verify classification to the other engine.
 ## Architecture
 
 `CodexAsk` sends requests to `/xask`, and the worker returns progress and
-the answer via `/tmp/hermes_xask_*`. For account actions, the MCP layer
-queues a call in `/tmp/hermes_tool_queue`; the loaded userbot module
+the answer via `/tmp/jarvisask_xask_*`. For account actions, the MCP layer
+queues a call in `/tmp/jarvisask_tool_queue`; the loaded userbot module
 executes it with its own Telethon session and returns the result. The
 `cmd_queue.py` queue is shared transport for ClaudeAsk and CodexAsk, and is
 not part of the standalone Bot API application.
@@ -40,10 +40,12 @@ not part of the standalone Bot API application.
 Requirements: Linux, Python 3.10+, systemd, the Codex CLI installed and
 authenticated (`codex login`). The host must also be running the shared
 queue relay with the `/xask`, `/xreset`, and Telegram tool endpoints. The
-userbot itself must be installed separately on a Telethon/Hikka host — this
-project targets the [Heroku](https://github.com/coddrago/Heroku) userbot;
-follow its own README for installing and starting the userbot before
-loading `codex_ask.py` into it.
+userbot itself must be installed separately — this project targets the
+[Heroku](https://github.com/coddrago/Heroku) userbot; follow its own README
+for installing and starting the userbot before loading `codex_ask.py` into
+it. Heroku can run on a dedicated Telethon/Hikka host or in Docker on the
+same machine as this backend — running it on a separate host is just this
+deployment's own choice, not a requirement.
 
 ```bash
 git clone https://github.com/maleon17/Codex-jarvis.git
