@@ -1,6 +1,6 @@
 [Unit]
 Description=Codex Jarvis userbot backend
-Documentation=https://github.com/maleon17/Codex-jarvis
+Documentation=https://github.com/maleon17/codex-ask
 After=network-online.target
 Wants=network-online.target
 

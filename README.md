@@ -1,10 +1,12 @@
-# Codex Jarvis
+# codex-ask
+
+> Part of **[telegram-ai](https://github.com/maleon17/telegram-ai)** — Claude/Codex ↔ Telegram, four ways.
 
 A standalone product for invoking Codex through a Telethon/Hikka userbot.
-This is not `Codex-telegram-bot` — the standalone Bot API application lives
+This is not `codex-telegram-bridge` — the standalone Bot API application lives
 in a different repository and isn't imported by this project.
 
-Repository: <https://github.com/maleon17/Codex-jarvis>
+Repository: <https://github.com/maleon17/codex-ask>
 
 ## What's included
 
@@ -48,8 +50,8 @@ same machine as this backend — running it on a separate host is just this
 deployment's own choice, not a requirement.
 
 ```bash
-git clone https://github.com/maleon17/Codex-jarvis.git
-cd Codex-jarvis
+git clone https://github.com/maleon17/codex-ask.git
+cd codex-ask
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -81,7 +83,7 @@ To reinstall the loaded module from the latest version on the `main`
 branch, run:
 
 ```text
-.dlm https://raw.githubusercontent.com/maleon17/Codex-jarvis/main/codex_ask.py
+.dlm https://raw.githubusercontent.com/maleon17/codex-ask/main/codex_ask.py
 ```
 
 Each instance's `.xasknet` settings are stored in Heroku's persistent
