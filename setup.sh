@@ -102,9 +102,10 @@ if [ -t 0 ]; then
     } >> "$JARVIS_ENV"
     chmod 600 "$JARVIS_ENV"
     echo "Wrote $JARVIS_ENV (git-ignored; the watcher loads it via EnvironmentFile=)."
-    echo "If the shared cmd_queue.py (from Claude-jarvis) runs from another directory,"
-    echo "set the SAME JARVIS_PERSONA_DIR in its service unit too, otherwise"
-    echo ".persona/.xpersona writes will not reach this watcher."
+    echo "The shared cmd_queue.py (from Claude-jarvis) serves /xpersona from its own"
+    echo "\$JARVIS_XPERSONA_DIR (defaults to \$JARVIS_PERSONA_DIR). Set"
+    echo "JARVIS_XPERSONA_DIR=$J_PERSONA_DIR in that relay's service unit, otherwise"
+    echo ".xpersona writes will not reach this watcher."
 fi
 
 python3 -m py_compile app_server.py codex_ask_watcher.py
