@@ -1,43 +1,49 @@
 # Codex Jarvis
 
-Отдельный продукт для вызова Codex через Telethon/Hikka userbot. Это не
-`Codex-telegram-bot`: standalone Bot API-приложение живёт в другом репозитории
-и не импортируется этим проектом.
+A standalone product for invoking Codex through a Telethon/Hikka userbot.
+This is not `Codex-telegram-bot` — the standalone Bot API application lives
+in a different repository and isn't imported by this project.
 
-Репозиторий: <https://github.com/maleon17/Codex-jarvis>
+Repository: <https://github.com/maleon17/Codex-jarvis>
 
-## Что входит
+## What's included
 
-- `codex_ask.py` — загружаемый модуль `CodexAsk` для userbot;
-- `codex_ask_watcher.py` — постоянный Codex app-server worker;
-- `telegram_actions_mcp.py` — MCP-инструменты реальных действий Telegram;
-- `app_server.py` — минимальный JSONL-клиент Codex app-server;
-- `setup.sh` и `codex-jarvis.service.example` — установка worker-а.
+- `codex_ask.py` — the loadable `CodexAsk` module for the userbot;
+- `codex_ask_watcher.py` — the persistent Codex app-server worker;
+- `telegram_actions_mcp.py` — MCP tools for real Telegram actions;
+- `app_server.py` — a minimal JSONL client for the Codex app-server;
+- `setup.sh` and `codex-jarvis.service.example` — worker installation.
 
-Команды модуля намеренно начинаются с `x`, чтобы не пересекаться с
-ClaudeAsk: `.xask`, `.xsearch`, `.xtranslate`, `.xnew`. История Codex хранится
-в собственном namespace `CodexAsk` и собственном `instance_id`. Хранилище
-правил триггеров общее с ClaudeAsk (`ClaudeAsk`), и у обоих модулей есть свой
-активный `@loader.watcher()` на входящие сообщения — оба вызывают общий
-координатор `JarvisAsk` (`handle_message`), который фильтрует по полю
-`engine` каждого триггера (`claude`/`codex`), поэтому конкретный триггер
-обрабатывается ровно одним движком и не срабатывает дважды. При недоступности
-своего бэкенда (лимит аккаунта, таймаут) `JarvisAsk.fallback()` переключает
-и агентские действия триггера, и verify-классификацию на второй движок.
+The module's commands deliberately start with `x` so they don't collide
+with ClaudeAsk: `.xask`, `.xsearch`, `.xtranslate`, `.xnew`. Codex history
+is stored in its own `CodexAsk` namespace and its own `instance_id`. The
+trigger-rule storage is shared with ClaudeAsk (`ClaudeAsk`), and both
+modules each have their own active `@loader.watcher()` on incoming
+messages — both call the shared `JarvisAsk` coordinator (`handle_message`),
+which filters by each trigger's `engine` field (`claude`/`codex`), so a
+given trigger is handled by exactly one engine and never fires twice. When
+its own backend is unavailable (account limit, timeout),
+`JarvisAsk.fallback()` switches both the trigger's agent actions and its
+verify classification to the other engine.
 
-## Архитектура
+## Architecture
 
-`CodexAsk` отправляет запросы в `/xask`, а worker возвращает прогресс и ответ
-через `/tmp/hermes_xask_*`. Для действий аккаунта MCP ставит вызов в
-`/tmp/hermes_tool_queue`; загруженный userbot-модуль выполняет его своей
-Telethon-сессией и возвращает результат. Очередь `cmd_queue.py` — общий
-транспорт для ClaudeAsk и CodexAsk, не часть standalone Bot API-приложения.
+`CodexAsk` sends requests to `/xask`, and the worker returns progress and
+the answer via `/tmp/hermes_xask_*`. For account actions, the MCP layer
+queues a call in `/tmp/hermes_tool_queue`; the loaded userbot module
+executes it with its own Telethon session and returns the result. The
+`cmd_queue.py` queue is shared transport for ClaudeAsk and CodexAsk, and is
+not part of the standalone Bot API application.
 
-## Установка worker-а
+## Worker installation
 
-Требования: Linux, Python 3.10+, systemd, установленный Codex CLI и активная
-авторизация (`codex login`). На хосте также должен работать общий queue relay с
-маршрутом `/xask`, `/xreset` и Telegram tool endpoints.
+Requirements: Linux, Python 3.10+, systemd, the Codex CLI installed and
+authenticated (`codex login`). The host must also be running the shared
+queue relay with the `/xask`, `/xreset`, and Telegram tool endpoints. The
+userbot itself must be installed separately on a Telethon/Hikka host — this
+project targets the [Heroku](https://github.com/coddrago/Heroku) userbot;
+follow its own README for installing and starting the userbot before
+loading `codex_ask.py` into it.
 
 ```bash
 git clone https://github.com/maleon17/Codex-jarvis.git
@@ -46,38 +52,41 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-Скрипт создаёт отдельный `CODEX_HOME`, виртуальное окружение для MCP и
-`config.toml` с локальными путями. Авторизация берётся из `$HOME/.codex/auth.json`
-через symlink и не копируется в Git. Runtime-файлы (`codex_home/`, `state/`,
-`.venv/`) игнорируются.
+The script creates a dedicated `CODEX_HOME`, a virtual environment for MCP,
+and a `config.toml` with local paths. Authentication is picked up from
+`$HOME/.codex/auth.json` via a symlink and is never copied into Git.
+Runtime files (`codex_home/`, `state/`, `.venv/`) are gitignored.
 
-Для ручной установки можно скопировать `codex-jarvis.service.example`, заменить
-`__USER__`, `__INSTALL_DIR__`, `__CODEX_HOME__` и `__CODEX_CWD__`, затем выполнить
-`sudo systemctl daemon-reload && sudo systemctl enable --now codex-jarvis.service`.
+For a manual install, you can copy `codex-jarvis.service.example`, replace
+`__USER__`, `__INSTALL_DIR__`, `__CODEX_HOME__`, and `__CODEX_CWD__`, then
+run `sudo systemctl daemon-reload && sudo systemctl enable --now codex-jarvis.service`.
 
-## Загрузка userbot-модуля
+## Loading the userbot module
 
-Отправь `codex_ask.py` документом в выделенный тестовый Telegram-канал и
-ответь на документ `.lm`. После загрузки в userbot доступны `.xask` и остальные
-команды. Токены userbot/Telegram в этот репозиторий не входят.
+Send `codex_ask.py` as a document to the dedicated test Telegram channel and
+reply to the document with `.lm`. Once loaded, `.xask` and the rest of the
+commands become available in the userbot. Userbot/Telegram tokens are not
+part of this repository.
 
-После загрузки один раз выполни `.xasknet local <instance_id>` или
-`.xasknet tailnet <instance_id> <backend_url>` для настройки сети конкретного
-экземпляра. Эта настройка заменяет конфигурацию только через переменные окружения.
+After loading, run `.xasknet local <instance_id>` or
+`.xasknet tailnet <instance_id> <backend_url>` once to configure the
+network for that instance. This setting replaces configuration via
+environment variables only.
 
-## Обновление
+## Updating
 
-Чтобы переустановить загруженный модуль с последней версии из ветки `main`,
-выполни:
+To reinstall the loaded module from the latest version on the `main`
+branch, run:
 
 ```text
 .dlm https://raw.githubusercontent.com/maleon17/Codex-jarvis/main/codex_ask.py
 ```
 
-Настройки `.xasknet` хранятся в постоянной базе Heroku и при таком обновлении
-не удаляются, поэтому повторная настройка не нужна.
+Each instance's `.xasknet` settings are stored in Heroku's persistent
+database and are not removed by such an update, so no reconfiguration is
+needed.
 
-## Проверка
+## Verification
 
 ```bash
 python3 -m py_compile app_server.py codex_ask_watcher.py
@@ -85,18 +94,19 @@ systemctl status codex-jarvis
 journalctl -u codex-jarvis -f
 ```
 
-После загрузки модуля проверь обычный `.xask` и запрос, требующий реального
-инструмента (`list_triggers`, `read_history` или `search_chat`). Финальный
-ответ формируется только после результата инструмента, а не из предварительной
-самоотчётности модели.
+After loading the module, verify a plain `.xask` and a request that
+requires a real tool (`list_triggers`, `read_history`, or `search_chat`).
+The final answer is only produced after the tool's actual result, never
+from the model's own unverified self-report.
 
-## Граница продуктов
+## Product boundaries
 
-`codex-telegram-bot` — отдельный Telegram Bot API интерфейс Codex. `Claude-jarvis`
-— отдельный ClaudeAsk userbot/backend. Этот репозиторий — только CodexAsk
-userbot/backend; общим остаётся лишь queue relay и namespace триггеров, потому
-что это инфраструктурный транспорт и намеренно общее хранилище правил.
+`codex-telegram-bot` is a separate Telegram Bot API interface for Codex.
+`Claude-jarvis` is the separate ClaudeAsk userbot/backend. This repository
+is only the CodexAsk userbot/backend; only the queue relay and the trigger
+namespace are shared, because that's infrastructure transport and a
+deliberately shared rule store.
 
-## Лицензия
+## License
 
-MIT, см. `LICENSE`.
+MIT, see `LICENSE`.
