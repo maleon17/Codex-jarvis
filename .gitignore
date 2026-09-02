@@ -6,3 +6,8 @@ state/
 .venv/
 codex-config.toml
 codex-jarvis.service
+
+# Live personas are local-only; only the neutral template ships in the repo.
+personas/*
+!personas/default.md.example
+jarvis.env
