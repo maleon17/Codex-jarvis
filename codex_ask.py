@@ -168,6 +168,27 @@ def _h(text):
     return html.escape(text or "", quote=False)
 
 
+_INLINE_CITATION_PUA_SPAN_RE = re.compile("\ue200.*?\ue201", re.DOTALL)
+_INLINE_CITATION_PUA_CHAR_RE = re.compile("[\ue200-\ue20b]")
+_INLINE_CITATION_TOKEN = r"turn\d+(?:search|news|view|forecast|finance|image|video|product)\d+"
+_INLINE_CITATION_DEGRADED_RE = re.compile(
+    rf"(?<!\w)(?:(?:(?:cite|navlist)?{_INLINE_CITATION_TOKEN})|navlist)+(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _strip_inline_citations(text):
+    """Remove ChatGPT/OpenAI web-search citation artifacts from model text."""
+    if not text:
+        return text
+
+    # Remove a complete invisible wrapper before stripping orphaned PUA
+    # separators/control characters left behind by a broken sanitizer.
+    text = _INLINE_CITATION_PUA_SPAN_RE.sub("", text)
+    text = _INLINE_CITATION_PUA_CHAR_RE.sub("", text)
+    return _INLINE_CITATION_DEGRADED_RE.sub("", text)
+
+
 # --- persona pager (ported from the owner's Remaker .vim editor) -----------
 _PERSONA_ZWSP = "​"
 _PERSONA_PAGE_MAX = 3600  # Telegram text limit is 4096; headroom for <pre> + guards
@@ -3624,6 +3645,7 @@ class CodexAsk(loader.Module):
         # outside any quote at all. Not wrapping the answer avoids the
         # conflict entirely; the recap lines above it still use blockquote
         # normally since they never contain model-authored HTML.
+        answer = _strip_inline_citations(answer)
         recap = "".join(f"\n<blockquote>🤔 {_h(t)}</blockquote>" for t in thoughts)
         await self._safe_edit(
             work_message,
